@@ -8,39 +8,18 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
-from pycytominer.cyto_utils import (
-    infer_cp_features,
-    load_normalize_transform,
-    load_profiles,
-    output,
-    save_normalize_transform,
-)
-from pycytominer.operations import RobustMAD, Spherize
 from pycytominer.cyto_utils.features import infer_cp_features
 from pycytominer.cyto_utils.load import load_profiles
+from pycytominer.cyto_utils.normalize_transform_io import (
+    load_normalize_transform,
+    save_normalize_transform,
+)
 from pycytominer.cyto_utils.util import write_to_file_if_user_specifies_output_details
 from pycytominer.operations import InverseNormalTransform, RobustMAD, Spherize
 
 
 @write_to_file_if_user_specifies_output_details
 def normalize(
-    profiles,
-    features="infer",
-    image_features=False,
-    meta_features="infer",
-    samples="all",
-    method="standardize",
-    output_file=None,
-    output_type="csv",
-    compression_options=None,
-    float_format=None,
-    mad_robustize_epsilon=1e-18,
-    spherize_center=True,
-    spherize_method="ZCA-cor",
-    spherize_epsilon=1e-6,
-    transform_output_file=None,
-    fitted_transform_file=None,
-):
     profiles: Union[str, pd.DataFrame],
     features: Union[str, list[str]] = "infer",
     image_features: bool = False,
@@ -59,6 +38,8 @@ def normalize(
     spherize_method: str = "ZCA-cor",
     spherize_epsilon: float = 1e-6,
     inverse_normal_n_quantiles: int = 1000,
+    transform_output_file: Optional[str] = None,
+    fitted_transform_file: Optional[str] = None,
 ) -> pd.DataFrame:
     """Normalize profiling features
 
@@ -129,13 +110,18 @@ def normalize(
     spherize_epsilon : float, default 1e-6.
         The sphering (aka whitening) fudge factor parameter. The function only uses
         this variable if method = "spherize".
+    inverse_normal_n_quantiles : int, default=1000
+        Number of cumulative distribution function landmarks used for the inverse
+        normal transformation. Values larger than the number of samples are capped
+        at the number of samples. Only used when ``method="inverse_normal"``.
     transform_output_file : str, optional
         If provided, save the fitted transform's parameters to this path so it can
         be reapplied later (e.g. to other subsets of data) via
         `fitted_transform_file`. The parameters are written as a numpy ".npz"
         archive plus a companion ".json" metadata file with the same basename (no
         pickling is used). Ignored if `fitted_transform_file` is also provided,
-        since no new fit is performed in that case.
+        since no new fit is performed in that case. Not supported for
+        `method="inverse_normal"`.
     fitted_transform_file : str, optional
         If provided, skip fitting a new transform and instead load a previously
         saved transform (written by a prior call using `transform_output_file`)
@@ -144,10 +130,6 @@ def normalize(
         `spherize_center`, `spherize_method`, `spherize_epsilon`) are ignored, since
         they are loaded from the saved transform instead. `features` must either be
         "infer" or match the feature columns the transform was fit on.
-    inverse_normal_n_quantiles : int, default=1000
-        Number of cumulative distribution function landmarks used for the inverse
-        normal transformation. Values larger than the number of samples are capped
-        at the number of samples. Only used when ``method="inverse_normal"``.
 
     Returns
     -------
@@ -212,11 +194,6 @@ def normalize(
     # Load Data
     profiles = load_profiles(profiles)
 
-    if fitted_transform_file is not None:
-        # Load a previously-fit transform and apply it directly, skipping
-        # `method`/`samples`/method-specific fitting parameters entirely
-        fitted_scaler, method, saved_features = load_normalize_transform(
-            fitted_transform_file
     # If drop_cosmicqc_rows is True, drop rows that are flagged (True) as QC failures from coSMicQC
     if drop_cosmicqc_rows:
         qc_columns = [
@@ -234,36 +211,12 @@ def normalize(
                 "No QC columns found with prefix 'Metadata_cqc_'. Cannot drop QC rows."
             )
 
-    # Define which scaler to use
-    method = method.lower()
-
-    avail_methods = [
-        "standardize",
-        "robustize",
-        "mad_robustize",
-        "spherize",
-        "inverse_normal",
-    ]
-    if method not in avail_methods:
-        raise ValueError(f"operation must be one {avail_methods}")
-
-    if method == "standardize":
-        scaler = StandardScaler()
-    elif method == "robustize":
-        scaler = RobustScaler()
-    elif method == "mad_robustize":
-        if mad_robustize_epsilon is None:
-            raise ValueError("mad_robustize_epsilon must be a float")
-        scaler = RobustMAD(epsilon=mad_robustize_epsilon)
-    elif method == "spherize":
-        scaler = Spherize(
-            center=spherize_center,
-            method=spherize_method,
-            epsilon=spherize_epsilon,
-            return_numpy=True,
+    if fitted_transform_file is not None:
+        # Load a previously-fit transform and apply it directly, skipping
+        # `method`/`samples`/method-specific fitting parameters entirely
+        fitted_scaler, method, saved_features = load_normalize_transform(
+            fitted_transform_file
         )
-    elif method == "inverse_normal":
-        scaler = InverseNormalTransform(n_quantiles=inverse_normal_n_quantiles)
 
         if features == "infer":
             features = saved_features
@@ -276,7 +229,13 @@ def normalize(
         # Define which scaler to use
         method = method.lower()
 
-        avail_methods = ["standardize", "robustize", "mad_robustize", "spherize"]
+        avail_methods = [
+            "standardize",
+            "robustize",
+            "mad_robustize",
+            "spherize",
+            "inverse_normal",
+        ]
         if method not in avail_methods:
             raise ValueError(f"operation must be one {avail_methods}")
 
@@ -285,6 +244,8 @@ def normalize(
         elif method == "robustize":
             scaler = RobustScaler()
         elif method == "mad_robustize":
+            if mad_robustize_epsilon is None:
+                raise ValueError("mad_robustize_epsilon must be a float")
             scaler = RobustMAD(epsilon=mad_robustize_epsilon)
         elif method == "spherize":
             scaler = Spherize(
@@ -293,24 +254,11 @@ def normalize(
                 epsilon=spherize_epsilon,
                 return_numpy=True,
             )
+        elif method == "inverse_normal":
+            scaler = InverseNormalTransform(n_quantiles=inverse_normal_n_quantiles)
 
         if features == "infer":
             features = infer_cp_features(profiles, image_features=image_features)
-
-        # Fit the sklearn scaler
-        if samples == "all":
-            fitted_scaler = scaler.fit(profiles.loc[:, features])
-        else:
-            # Subset to only the features measured in the sample query
-            fitted_scaler = scaler.fit(profiles.query(samples).loc[:, features])
-
-        if transform_output_file is not None:
-            save_normalize_transform(
-                scaler=fitted_scaler,
-                method=method,
-                features=features,
-                output_file=transform_output_file,
-            )
 
     if isinstance(features, str):
         raise ValueError("features must be a list of strings, not a single string")
@@ -407,6 +355,22 @@ def normalize(
         and (column.startswith("Image_") or column.startswith("ome_arrow_"))
     ]
     passthrough_image_df = profiles.loc[:, passthrough_image_columns]
+
+    if fitted_transform_file is None:
+        # Fit the sklearn scaler
+        if samples == "all":
+            fitted_scaler = scaler.fit(feature_df)
+        else:
+            # Subset to only the features measured in the sample query
+            fitted_scaler = scaler.fit(profiles.query(samples).loc[:, features])
+
+        if transform_output_file is not None:
+            save_normalize_transform(
+                scaler=fitted_scaler,
+                method=method,
+                features=features,
+                output_file=transform_output_file,
+            )
 
     fitted_scaled = fitted_scaler.transform(feature_df)
 
