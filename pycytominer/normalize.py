@@ -5,7 +5,13 @@ Normalize observation features based on specified normalization method
 import pandas as pd
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
-from pycytominer.cyto_utils import infer_cp_features, load_profiles, output
+from pycytominer.cyto_utils import (
+    infer_cp_features,
+    load_normalize_transform,
+    load_profiles,
+    output,
+    save_normalize_transform,
+)
 from pycytominer.operations import RobustMAD, Spherize
 
 
@@ -24,6 +30,8 @@ def normalize(
     spherize_center=True,
     spherize_method="ZCA-cor",
     spherize_epsilon=1e-6,
+    transform_output_file=None,
+    fitted_transform_file=None,
 ):
     """Normalize profiling features
 
@@ -78,6 +86,21 @@ def normalize(
     spherize_epsilon : float, default 1e-6.
         The sphering (aka whitening) fudge factor parameter. The function only uses
         this variable if method = "spherize".
+    transform_output_file : str, optional
+        If provided, save the fitted transform's parameters to this path so it can
+        be reapplied later (e.g. to other subsets of data) via
+        `fitted_transform_file`. The parameters are written as a numpy ".npz"
+        archive plus a companion ".json" metadata file with the same basename (no
+        pickling is used). Ignored if `fitted_transform_file` is also provided,
+        since no new fit is performed in that case.
+    fitted_transform_file : str, optional
+        If provided, skip fitting a new transform and instead load a previously
+        saved transform (written by a prior call using `transform_output_file`)
+        and apply it directly to `profiles`. The `method`, `samples`, and
+        method-specific fitting parameters (e.g. `mad_robustize_epsilon`,
+        `spherize_center`, `spherize_method`, `spherize_epsilon`) are ignored, since
+        they are loaded from the saved transform instead. `features` must either be
+        "infer" or match the feature columns the transform was fit on.
 
     Returns
     -------
@@ -123,29 +146,59 @@ def normalize(
     # Load Data
     profiles = load_profiles(profiles)
 
-    # Define which scaler to use
-    method = method.lower()
-
-    avail_methods = ["standardize", "robustize", "mad_robustize", "spherize"]
-    if method not in avail_methods:
-        raise ValueError(f"operation must be one {avail_methods}")
-
-    if method == "standardize":
-        scaler = StandardScaler()
-    elif method == "robustize":
-        scaler = RobustScaler()
-    elif method == "mad_robustize":
-        scaler = RobustMAD(epsilon=mad_robustize_epsilon)
-    elif method == "spherize":
-        scaler = Spherize(
-            center=spherize_center,
-            method=spherize_method,
-            epsilon=spherize_epsilon,
-            return_numpy=True,
+    if fitted_transform_file is not None:
+        # Load a previously-fit transform and apply it directly, skipping
+        # `method`/`samples`/method-specific fitting parameters entirely
+        fitted_scaler, method, saved_features = load_normalize_transform(
+            fitted_transform_file
         )
 
-    if features == "infer":
-        features = infer_cp_features(profiles, image_features=image_features)
+        if features == "infer":
+            features = saved_features
+        elif list(features) != list(saved_features):
+            raise ValueError(
+                "The provided `features` do not match the features used to fit "
+                "the transform loaded from `fitted_transform_file`."
+            )
+    else:
+        # Define which scaler to use
+        method = method.lower()
+
+        avail_methods = ["standardize", "robustize", "mad_robustize", "spherize"]
+        if method not in avail_methods:
+            raise ValueError(f"operation must be one {avail_methods}")
+
+        if method == "standardize":
+            scaler = StandardScaler()
+        elif method == "robustize":
+            scaler = RobustScaler()
+        elif method == "mad_robustize":
+            scaler = RobustMAD(epsilon=mad_robustize_epsilon)
+        elif method == "spherize":
+            scaler = Spherize(
+                center=spherize_center,
+                method=spherize_method,
+                epsilon=spherize_epsilon,
+                return_numpy=True,
+            )
+
+        if features == "infer":
+            features = infer_cp_features(profiles, image_features=image_features)
+
+        # Fit the sklearn scaler
+        if samples == "all":
+            fitted_scaler = scaler.fit(profiles.loc[:, features])
+        else:
+            # Subset to only the features measured in the sample query
+            fitted_scaler = scaler.fit(profiles.query(samples).loc[:, features])
+
+        if transform_output_file is not None:
+            save_normalize_transform(
+                scaler=fitted_scaler,
+                method=method,
+                features=features,
+                output_file=transform_output_file,
+            )
 
     # Separate out the features and meta
     feature_df = profiles.loc[:, features]
@@ -153,13 +206,6 @@ def normalize(
         meta_features = infer_cp_features(profiles, metadata=True)
 
     meta_df = profiles.loc[:, meta_features]
-
-    # Fit the sklearn scaler
-    if samples == "all":
-        fitted_scaler = scaler.fit(feature_df)
-    else:
-        # Subset to only the features measured in the sample query
-        fitted_scaler = scaler.fit(profiles.query(samples).loc[:, features])
 
     fitted_scaled = fitted_scaler.transform(feature_df)
 
