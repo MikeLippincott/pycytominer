@@ -3,34 +3,43 @@ Returns list of features such that no two features have a correlation greater th
 specified threshold
 """
 
-from pycytominer.cyto_utils import (
+from typing import Union
+
+import pandas as pd
+
+from pycytominer.cyto_utils.features import infer_cp_features
+from pycytominer.cyto_utils.util import (
     check_correlation_method,
     get_pairwise_correlation,
-    infer_cp_features,
 )
 
 
 def correlation_threshold(
-    population_df, features="infer", samples="all", threshold=0.9, method="pearson"
-):
+    population_df: pd.DataFrame,
+    features: Union[str, list[str]] = "infer",
+    samples: str = "all",
+    threshold: float = 0.9,
+    method: str = "pearson",
+) -> list[str]:
     """Exclude features that have correlations above a certain threshold
 
     Parameters
     ----------
-    population_df : pandas.core.frame.DataFrame
+    population_df : pd.DataFrame
         DataFrame that includes metadata and observation features.
     features : list, default "infer"
-         List of features present in the population dataframe [default: "infer"]
-         if "infer", then assume cell painting features are those that start with
-         "Cells_", "Nuclei_", or "Cytoplasm_".
+        A list of strings corresponding to feature measurement column names in the
+        `population_df` DataFrame. All features listed must be found in `population_df`.
+        Defaults to "infer". If "infer", then assume CellProfiler features are those
+        prefixed with "Cells", "Nuclei", or "Cytoplasm".
     samples : str, default "all"
         List of samples to perform operation on. The function uses a pd.DataFrame.query()
         function, so you should  structure samples in this fashion. An example is
         "Metadata_treatment == 'control'" (include all quotes).
         If "all", use all samples to calculate.
-    threshold - float, default 0.9
+    threshold : float, default 0.9
         Must be between (0, 1) to exclude features
-    method - str, default "pearson"
+    method : str, default "pearson"
         indicating which correlation metric to use to test cutoff
 
     Returns
@@ -39,20 +48,29 @@ def correlation_threshold(
          List of features to exclude from the population_df.
     """
 
-    # Check that the input method is supported
+    # Checking if the provided correlation method is supported
     method = check_correlation_method(method)
 
+    # Checking if the threshold is between 0 and 1
     if not 0 <= threshold <= 1:
         raise ValueError("threshold variable must be between (0 and 1)")
 
     # Subset dataframe and calculate correlation matrix across subset features
+    # If samples is not 'all', then subset the dataframe
     if samples != "all":
-        population_df.query(samples, inplace=True)
+        # Using pandas query to filter rows based on the conditions provided in the
+        # samples parameter
+        population_df = population_df.query(expr=samples)
 
+    # Infer CellProfiler features if 'features' is set to 'infer'
     if features == "infer":
-        features = infer_cp_features(population_df)
+        # Infer CellProfiler features
+        inferred_features = infer_cp_features(population_df)
+    elif isinstance(features, list):
+        inferred_features = features
 
-    population_df = population_df.loc[:, features]
+    # Subset the DataFrame to only include the features of interest
+    population_df = population_df.loc[:, inferred_features]
 
     # Get correlation matrix and lower triangle of pairwise correlations in long format
     data_cor_df, pairwise_df = get_pairwise_correlation(
@@ -79,27 +97,31 @@ def correlation_threshold(
     return list(set(excluded.tolist()))
 
 
-def determine_high_cor_pair(correlation_row, sorted_correlation_pairs):
+def determine_high_cor_pair(
+    correlation_row: pd.Series, sorted_correlation_pairs: pd.Index
+) -> str:
     """Select highest correlated variable given a correlation row with columns:
     ["pair_a", "pair_b", "correlation"]. For use in a pandas.apply().
 
     Parameters
     ----------
-    correlation_row : pandas.core.series.series
+    correlation_row : pd.Series
         Pandas series of the specific feature in the pairwise_df
-    sorted_correlation_pairs : pandas.DataFrame.index
+    sorted_correlation_pairs : pd.Index
         A sorted object by total correlative sum to all other features
 
     Returns
     -------
-    The feature that has a lower total correlation sum with all other features
+    str
+        The feature that has a lower total correlation sum with all other features
     """
 
     pair_a = correlation_row["pair_a"]
     pair_b = correlation_row["pair_b"]
 
-    if sorted_correlation_pairs.get_loc(pair_a) > sorted_correlation_pairs.get_loc(
-        pair_b
+    if (
+        sorted_correlation_pairs.get_indexer_for(pd.Index([pair_a]))[0]
+        > sorted_correlation_pairs.get_indexer_for(pd.Index([pair_b]))[0]
     ):
         return pair_a
     else:

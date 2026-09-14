@@ -4,20 +4,27 @@ Utility function to load and process the output files of a DeepProfiler run.
 
 import os
 import pathlib
-import pandas as pd
 import warnings
+from typing import Optional, Union, cast
 
-from pycytominer import aggregate, normalize
-from pycytominer.cyto_utils import (
-    load_npz_features,
-    load_npz_locations,
+import pandas as pd
+
+# use mypy ignores below to avoid duplicate import warnings
+from pycytominer import aggregate, normalize  # type: ignore[no-redef]
+from pycytominer.cyto_utils.features import (  # type: ignore[no-redef]
     infer_cp_features,
-    output,
 )
+from pycytominer.cyto_utils.load import load_npz_features, load_npz_locations
+from pycytominer.cyto_utils.output import output
 
 
 class DeepProfilerData:
     """This class holds all functions needed to load and annotate the DeepProfiler (DP) run.
+
+    .. warning::
+        The ``DeepProfilerData`` class is deprecated and will be removed in a
+        future Pycytominer release. Please use
+        `CytoTable <https://github.com/cytomining/CytoTable>`_ instead.
 
     Attributes
     ----------
@@ -43,10 +50,10 @@ class DeepProfilerData:
 
     def __init__(
         self,
-        index_file,
-        profile_dir,
-        filename_delimiter="_",
-        file_extension=".npz",
+        index_file: str,
+        profile_dir: str,
+        filename_delimiter: str = "_",
+        file_extension: str = ".npz",
     ):
         """
         __init__ function for this class.
@@ -58,6 +65,15 @@ class DeepProfilerData:
 
         See above for all other parameters.
         """
+
+        # setting DeepProfilerData deprecation warning
+        warnings.warn(
+            "The DeepProfilerData class is deprecated and will be removed in a future "
+            "Pycytominer release. Please use CytoTable instead: "
+            "https://github.com/cytomining/CytoTable",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
 
         self.index_df = pd.read_csv(index_file, dtype=str)
         self.profile_dir = profile_dir
@@ -77,7 +93,7 @@ class DeepProfilerData:
             pathlib.PurePath(f"{self.profile_dir}/{x}") for x in self.filenames
         ]
 
-    def build_filename_from_index(self, row):
+    def build_filename_from_index(self, row: pd.Series) -> str:
         """
         Builds the name of the profile files
         """
@@ -88,7 +104,9 @@ class DeepProfilerData:
         filename = f"{plate}/{well}{self.filename_delimiter}{site}{self.file_extension}"
         return filename
 
-    def extract_filename_metadata(self, npz_file, delimiter="_"):
+    def extract_filename_metadata(
+        self, npz_file: str, delimiter: str = "_"
+    ) -> dict[str, str]:
         """
         Extract metadata (site, well and plate) from the filename.
         The input format of the file: path/plate/well{delimiter}site.npz
@@ -106,14 +124,18 @@ class DeepProfilerData:
         loc : dict
             dict with metadata
         """
+        npz_path = pathlib.PurePath(npz_file)
         if delimiter == "/":
-            site = str(npz_file).split("/")[-1].strip(".npz")
-            well = str(npz_file).split("/")[-2]
+            # Layout: .../plate/well/site.npz
+            site = npz_path.stem
+            well = npz_path.parent.name
+            plate = npz_path.parent.parent.name
         else:
-            base_file = os.path.basename(npz_file).strip(".npz").split(delimiter)
+            # Layout: .../plate/well{delimiter}site.npz
+            base_file = npz_path.stem.split(delimiter)
             site = base_file[-1]
             well = base_file[-2]
-        plate = str(npz_file).split("/")[-2]
+            plate = npz_path.parent.name
 
         loc = {"site": site, "well": well, "plate": plate}
         return loc
@@ -121,6 +143,11 @@ class DeepProfilerData:
 
 class AggregateDeepProfiler:
     """This class holds all functions needed to aggregate the DeepProfiler (DP) run.
+
+    .. warning::
+        The ``AggregateDeepProfiler`` class is deprecated and will be removed
+        in a future Pycytominer release. Please use
+        `CytoTable <https://github.com/cytomining/CytoTable>`_ instead.
 
     Attributes
     ----------
@@ -156,9 +183,9 @@ class AggregateDeepProfiler:
     def __init__(
         self,
         deep_data: DeepProfilerData,
-        aggregate_operation="median",
-        aggregate_on="well",
-        output_file=None,
+        aggregate_operation: str = "median",
+        aggregate_on: str = "well",
+        output_file: Optional[str] = None,
     ):
         """
         __init__ function for this class.
@@ -167,15 +194,32 @@ class AggregateDeepProfiler:
         ---------
         See above for all parameters.
         """
-        assert aggregate_operation in [  # noqa: S101
+
+        # setting AggregateDeepProfiler deprecation warning
+        warnings.warn(
+            "The AggregateDeepProfiler class is deprecated and will be removed in a future "
+            "Pycytominer release. Please use CytoTable instead: "
+            "https://github.com/cytomining/CytoTable",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+
+        if aggregate_operation not in [
             "median",
             "mean",
-        ], "Input of aggregate_operation is incorrect, it must be either median or mean"
-        assert aggregate_on in [  # noqa: S101
+        ]:
+            raise ValueError(
+                "Input of aggregate_operation is incorrect, it must be either median or mean"
+            )
+
+        if aggregate_on not in [
             "site",
             "well",
             "plate",
-        ], "Input of aggregate_on is incorrect, it must be either site or well or plate"
+        ]:
+            raise ValueError(
+                "Input of aggregate_on is incorrect, it must be either site or well or plate"
+            )
 
         self.deep_data = deep_data
         self.aggregate_operation = aggregate_operation
@@ -312,6 +356,11 @@ class AggregateDeepProfiler:
 class SingleCellDeepProfiler:
     """This class holds functions needed to analyze single cells from the DeepProfiler (DP) run. Only pycytominer.normalization() is implemented.
 
+    .. warning::
+        The ``SingleCellDeepProfiler`` class is deprecated and will be removed
+        in a future Pycytominer release. Please use
+        `CytoTable <https://github.com/cytomining/CytoTable>`_ instead.
+
     Attributes
     ----------
     deep_data : DeepProfilerData
@@ -354,12 +403,22 @@ class SingleCellDeepProfiler:
         ---------
         See above for all parameters.
         """
-
+        # setting SingleCellDeepProfiler deprecation warning
+        warnings.warn(
+            "The SingleCellDeepProfiler class is deprecated and will be removed in a future "
+            "Pycytominer release. Please use CytoTable instead: "
+            "https://github.com/cytomining/CytoTable",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
         self.deep_data = deep_data
 
     def get_single_cells(
-        self, output=False, location_x_col_index=0, location_y_col_index=1
-    ):
+        self,
+        output: bool = False,
+        location_x_col_index: int = 0,
+        location_y_col_index: int = 1,
+    ) -> Optional[pd.DataFrame]:
         """
         Sets up the single_cells attribute or output as a variable. This is a helper function to normalize_deep_single_cells().
         single_cells is a pandas dataframe in the format expected by pycytominer.normalize().
@@ -395,27 +454,28 @@ class SingleCellDeepProfiler:
             total_df.append(detailed_df)
 
         sc_df = pd.concat(total_df).reset_index(drop=True)
-        if output:
-            return sc_df
-        else:
+
+        if not output:
             self.single_cells = sc_df
+
+        return sc_df
 
     def normalize_deep_single_cells(
         self,
-        location_x_col_index=0,
-        location_y_col_index=1,
-        image_features=False,  # not implemented with DeepProfiler
-        meta_features="infer",
-        samples="all",
-        method="standardize",
-        output_file=None,
-        compression_options=None,
-        float_format=None,
-        mad_robustize_epsilon=1e-18,
-        spherize_center=True,
-        spherize_method="ZCA-cor",
-        spherize_epsilon=1e-6,
-    ):
+        location_x_col_index: int = 0,
+        location_y_col_index: int = 1,
+        image_features: bool = False,  # not implemented with DeepProfiler
+        meta_features: str = "infer",
+        samples: str = "all",
+        method: str = "standardize",
+        output_file: Optional[str] = None,
+        compression_options: Optional[str] = None,
+        float_format: Optional[str] = None,
+        mad_robustize_epsilon: float = 1e-18,
+        spherize_center: bool = True,
+        spherize_method: str = "ZCA-cor",
+        spherize_epsilon: float = 1e-6,
+    ) -> Union[pd.DataFrame, str]:
         """
         Normalizes all cells into a pandas dataframe.
 
@@ -448,20 +508,24 @@ class SingleCellDeepProfiler:
         ]
 
         # wrapper for pycytominer.normalize() function
-        normalized = normalize.normalize(
-            profiles=self.single_cells,
-            features=derived_features,
-            image_features=image_features,
-            meta_features=meta_features,
-            samples=samples,
-            method=method,
-            output_file=None,
-            compression_options=compression_options,
-            float_format=float_format,
-            mad_robustize_epsilon=mad_robustize_epsilon,
-            spherize_center=spherize_center,
-            spherize_method=spherize_method,
-            spherize_epsilon=spherize_epsilon,
+        # note: normalize will return a dataframe when output_file is None
+        normalized = cast(
+            pd.DataFrame,
+            normalize.normalize(
+                profiles=self.single_cells,
+                features=derived_features,
+                image_features=image_features,
+                meta_features=meta_features,
+                samples=samples,
+                method=method,
+                output_file=None,
+                compression_options=compression_options,
+                float_format=float_format,
+                mad_robustize_epsilon=mad_robustize_epsilon,
+                spherize_center=spherize_center,
+                spherize_method=spherize_method,
+                spherize_epsilon=spherize_epsilon,
+            ),
         )
 
         # move x locations and y locations to metadata columns of normalized df
@@ -472,7 +536,7 @@ class SingleCellDeepProfiler:
 
         # separate code because normalize() will not return if it has an output file specified
         if output_file is not None:
-            output(
+            return output(
                 df=normalized,
                 output_filename=output_file,
                 compression_options=compression_options,

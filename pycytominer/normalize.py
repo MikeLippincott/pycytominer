@@ -2,6 +2,9 @@
 Normalize observation features based on specified normalization method
 """
 
+from typing import Any, Literal, Optional, Union
+
+import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
@@ -13,8 +16,13 @@ from pycytominer.cyto_utils import (
     save_normalize_transform,
 )
 from pycytominer.operations import RobustMAD, Spherize
+from pycytominer.cyto_utils.features import infer_cp_features
+from pycytominer.cyto_utils.load import load_profiles
+from pycytominer.cyto_utils.util import write_to_file_if_user_specifies_output_details
+from pycytominer.operations import InverseNormalTransform, RobustMAD, Spherize
 
 
+@write_to_file_if_user_specifies_output_details
 def normalize(
     profiles,
     features="infer",
@@ -33,23 +41,54 @@ def normalize(
     transform_output_file=None,
     fitted_transform_file=None,
 ):
+    profiles: Union[str, pd.DataFrame],
+    features: Union[str, list[str]] = "infer",
+    image_features: bool = False,
+    meta_features: Union[str, list[str]] = "infer",
+    samples: str = "all",
+    method: str = "standardize",
+    drop_cosmicqc_rows: bool = False,
+    output_file: Optional[str] = None,
+    output_type: Optional[
+        Literal["csv", "parquet", "anndata_h5ad", "anndata_zarr"]
+    ] = "csv",
+    compression_options: Optional[Union[str, dict[str, Any]]] = None,
+    float_format: Optional[str] = None,
+    mad_robustize_epsilon: Optional[float] = 1e-18,
+    spherize_center: bool = True,
+    spherize_method: str = "ZCA-cor",
+    spherize_epsilon: float = 1e-6,
+    inverse_normal_n_quantiles: int = 1000,
+) -> pd.DataFrame:
     """Normalize profiling features
 
     Parameters
     ----------
-    profiles : pandas.core.frame.DataFrame or path
+    profiles : pd.DataFrame or path
         Either a pandas DataFrame or a file that stores profile data
     features : list
         A list of strings corresponding to feature measurement column names in the
         `profiles` DataFrame. All features listed must be found in `profiles`.
-        Defaults to "infer". If "infer", then assume cell painting features are those
-        prefixed with "Cells", "Nuclei", or "Cytoplasm".
-    image_features: bool, default False
-        Whether the profiles contain image features.
+        Defaults to "infer". If "infer", then assume features are from CellProfiler output and
+        prefixed with "Cells", "Nuclei", or "Cytoplasm". Selected feature columns
+        must be numeric. Missing values are allowed as long as the column
+        remains numeric. As a temporary compatibility measure, Pycytominer
+        also treats common missing-value strings such as ``"nan"`` and
+        ``"None"`` as missing values in selected feature columns before
+        numeric validation. If you are working with mixed profile and image
+        payload data, pass explicit feature columns when needed to avoid
+        selecting non-profile content.
+    image_features : bool, default False
+        Whether to include inferred ``Image_*`` feature columns alongside the
+        default CellProfiler compartments. This preserves support for numeric
+        image-level measurements while avoiding non-numeric ``Image_*``
+        payload columns from OME-Arrow-backed or similarly mixed tables.
+        Non-normalized image payload columns are preserved in the output.
     meta_features : list
         A list of strings corresponding to metadata column names in the `profiles`
         DataFrame. All features listed must be found in `profiles`. Defaults to "infer".
-        If "infer", then assume metadata features are those prefixed with "Metadata"
+        If "infer", then assume CellProfiler metadata features, identified by
+        column names that begin with the `Metadata_` prefix."
     samples : str
         The metadata column values to use as a normalization reference. We often use
         control samples. The function uses a pd.query() function, so you should
@@ -58,6 +97,10 @@ def normalize(
     method : str
         How to normalize the dataframe. Defaults to "standardize". Check avail_methods
         for available normalization methods.
+    drop_cosmicqc_rows : bool
+        Whether to drop rows that are flagged as QC failures. The function looks for columns
+        from coSMicQC with "Metadata_cqc_" prefix and drop rows with True. Defaults to False.
+        Suggested use after a prior call to `pycytominer.annotate(external_metadata=qc.parquet)`.
     output_file : str, optional
         If provided, will write normalized profiles to file. If not specified, will
         return the normalized profiles as output. We recommend that this output file be
@@ -72,7 +115,7 @@ def normalize(
         Decimal precision to use in writing output file as input to
         pd.DataFrame.to_csv(float_format=float_format). For example, use "%.3g" for 3
         decimal precision.
-    mad_robustize_epsilon: float, optional
+    mad_robustize_epsilon : float, optional
         The mad_robustize fudge factor parameter. The function only uses
         this variable if method = "mad_robustize". Set this to 0 if
         mad_robustize generates features with large values.
@@ -101,46 +144,69 @@ def normalize(
         `spherize_center`, `spherize_method`, `spherize_epsilon`) are ignored, since
         they are loaded from the saved transform instead. `features` must either be
         "infer" or match the feature columns the transform was fit on.
+    inverse_normal_n_quantiles : int, default=1000
+        Number of cumulative distribution function landmarks used for the inverse
+        normal transformation. Values larger than the number of samples are capped
+        at the number of samples. Only used when ``method="inverse_normal"``.
 
     Returns
     -------
-    normalized : pandas.core.frame.DataFrame, optional
-        The normalized profile DataFrame. If output_file=None, then return the
-        DataFrame. If you specify output_file, then write to file and do not return
-        data.
+    pd.DataFrame
+        DataFrame of normalized features. if output_file=none, then return the
+        DataFrame. if you specify output_file, profiles will be written on disk
+        based on provided output_file path.
+
+    Raises
+    ------
+    ValueError
+        Raised when inferred or manually selected feature columns are non-numeric,
+        because Pycytominer normalization methods operate on numeric features
+        only. In that case, select numeric features explicitly before calling
+        ``normalize()``, for example by passing a curated feature list or by
+        running ``feature_select()`` first.
+
+    Notes
+    -----
+    Parameters: `output_file`, `output_type`, `compression_options`, and `float_format`
+    are passed as kwargs to the `write_to_file_if_user_specifies_output_details` decorator,
+    which handles writing the output DataFrame to file if the user specifies output
+    details. If `output_file` is not specified, the function will return the normalized
+    DataFrame instead of writing to file.
 
     Examples
     --------
-    import pandas as pd
-    from pycytominer import normalize
+    .. code-block:: python
 
-    data_df = pd.DataFrame(
-        {
-            "Metadata_plate": ["a", "a", "a", "a", "b", "b", "b", "b"],
-            "Metadata_treatment": [
-                "drug",
-                "drug",
-                "control",
-                "control",
-                "drug",
-                "drug",
-                "control",
-                "control",
-            ],
-            "x": [1, 2, 8, 2, 5, 5, 5, 1],
-            "y": [3, 1, 7, 4, 5, 9, 6, 1],
-            "z": [1, 8, 2, 5, 6, 22, 2, 2],
-            "zz": [14, 46, 1, 6, 30, 100, 2, 2],
-        }
-    ).reset_index(drop=True)
+        import pandas as pd
+        from pycytominer import normalize
 
-    normalized_df = normalize(
-        profiles=data_df,
-        features=["x", "y", "z", "zz"],
-        meta_features="infer",
-        samples="Metadata_treatment == 'control'",
-        method="standardize"
-    )
+        data_df = pd.DataFrame(
+            {
+                "Metadata_plate": ["a", "a", "a", "a", "b", "b", "b", "b"],
+                "Metadata_treatment": [
+                    "drug",
+                    "drug",
+                    "control",
+                    "control",
+                    "drug",
+                    "drug",
+                    "control",
+                    "control",
+                ],
+                "x": [1, 2, 8, 2, 5, 5, 5, 1],
+                "y": [3, 1, 7, 4, 5, 9, 6, 1],
+                "z": [1, 8, 2, 5, 6, 22, 2, 2],
+                "zz": [14, 46, 1, 6, 30, 100, 2, 2],
+            }
+        ).reset_index(drop=True)
+
+        normalized_df = normalize(
+            profiles=data_df,
+            features=["x", "y", "z", "zz"],
+            meta_features=["Metadata_plate", "Metadata_treatment"],
+            samples="Metadata_treatment == 'control'",
+            method="standardize",
+        )
     """
 
     # Load Data
@@ -151,7 +217,53 @@ def normalize(
         # `method`/`samples`/method-specific fitting parameters entirely
         fitted_scaler, method, saved_features = load_normalize_transform(
             fitted_transform_file
+    # If drop_cosmicqc_rows is True, drop rows that are flagged (True) as QC failures from coSMicQC
+    if drop_cosmicqc_rows:
+        qc_columns = [
+            col for col in profiles.columns if col.startswith("Metadata_cqc_")
+        ]
+        if qc_columns:
+            passed_qc = ~profiles[qc_columns].any(axis="columns")
+            profiles = profiles[passed_qc]
+            if profiles.empty:
+                raise ValueError(
+                    "All rows were dropped after QC filtering; cannot normalize an empty dataset."
+                )
+        else:
+            raise ValueError(
+                "No QC columns found with prefix 'Metadata_cqc_'. Cannot drop QC rows."
+            )
+
+    # Define which scaler to use
+    method = method.lower()
+
+    avail_methods = [
+        "standardize",
+        "robustize",
+        "mad_robustize",
+        "spherize",
+        "inverse_normal",
+    ]
+    if method not in avail_methods:
+        raise ValueError(f"operation must be one {avail_methods}")
+
+    if method == "standardize":
+        scaler = StandardScaler()
+    elif method == "robustize":
+        scaler = RobustScaler()
+    elif method == "mad_robustize":
+        if mad_robustize_epsilon is None:
+            raise ValueError("mad_robustize_epsilon must be a float")
+        scaler = RobustMAD(epsilon=mad_robustize_epsilon)
+    elif method == "spherize":
+        scaler = Spherize(
+            center=spherize_center,
+            method=spherize_method,
+            epsilon=spherize_epsilon,
+            return_numpy=True,
         )
+    elif method == "inverse_normal":
+        scaler = InverseNormalTransform(n_quantiles=inverse_normal_n_quantiles)
 
         if features == "infer":
             features = saved_features
@@ -200,12 +312,101 @@ def normalize(
                 output_file=transform_output_file,
             )
 
+    if isinstance(features, str):
+        raise ValueError("features must be a list of strings, not a single string")
+
+    # Temporary compatibility path for accommodating CellProfiler-style imports
+    # that encode
+    # missing feature values as strings such as "nan" or "None". Only
+    # missing-value-like strings are coerced; other non-numeric content still
+    # fails validation below. String matching is case-insensitive after
+    # whitespace stripping and lowercasing.
+    missing_string_tokens = {"", "na", "n/a", "nan", "none", "null"}
+    for feature in features:
+        # Already-numeric feature columns do not need compatibility cleanup.
+        if pd.api.types.is_numeric_dtype(profiles[feature]):
+            continue
+
+        non_null_values = profiles[feature].dropna()
+        # A column of only missing values can pass through to downstream numeric
+        # handling without special coercion here.
+        if non_null_values.empty:
+            continue
+
+        # Split mixed object columns into string markers versus other values so
+        # we can distinguish missing-value strings from truly malformed content.
+        string_values = non_null_values[
+            non_null_values.map(lambda value: isinstance(value, str))
+        ]
+        non_string_values = non_null_values[
+            non_null_values.map(lambda value: not isinstance(value, str))
+        ]
+
+        # Non-string values must still be numeric for this compatibility path
+        # to apply.
+        non_string_values_are_numeric = non_string_values.map(
+            pd.api.types.is_number
+        ).all()
+
+        # If the column contains no strings, or mixes strings with non-numeric
+        # payloads, leave it untouched so validation can reject it below.
+        if not non_string_values_are_numeric or string_values.empty:
+            continue
+
+        # Only coerce when every remaining string is a missing-value marker;
+        # this avoids silently converting arbitrary strings to NaN.
+        if (
+            string_values
+            .map(lambda value: value.strip().lower())
+            .isin(missing_string_tokens)
+            .all()
+        ):
+            profiles[feature] = profiles[feature].map(
+                lambda value: (
+                    np.nan
+                    if isinstance(value, str)
+                    and value.strip().lower() in missing_string_tokens
+                    else value
+                )
+            )
+            profiles[feature] = pd.to_numeric(profiles[feature], errors="coerce")
+
+    non_numeric_features = [
+        feature
+        for feature in features
+        if not pd.api.types.is_numeric_dtype(profiles[feature])
+    ]
+    if non_numeric_features:
+        raise ValueError(
+            "normalize() requires numeric feature columns. "
+            "Found non-numeric columns: "
+            f"{non_numeric_features}. "
+            "Select numeric features explicitly before normalization, "
+            "for example by passing a curated feature list or by running "
+            "feature_select() first."
+        )
+
     # Separate out the features and meta
     feature_df = profiles.loc[:, features]
     if meta_features == "infer":
         meta_features = infer_cp_features(profiles, metadata=True)
 
+    if isinstance(meta_features, str):
+        raise ValueError("meta_features must be a list of strings, not a single string")
+
     meta_df = profiles.loc[:, meta_features]
+    # Preserve image payload columns without normalizing them. The
+    # ``ome_arrow_*`` prefix is a flexible naming convention used here for
+    # OME-Arrow payload columns, not a strict upstream requirement; see the
+    # ome-arrow project docs for the broader format context:
+    # https://pypi.org/project/ome-arrow/
+    passthrough_image_columns = [
+        column
+        for column in profiles.columns
+        if column not in set(features).union(meta_features)
+        and (column.startswith("Image_") or column.startswith("ome_arrow_"))
+    ]
+    passthrough_image_df = profiles.loc[:, passthrough_image_columns]
 
     fitted_scaled = fitted_scaler.transform(feature_df)
 
@@ -217,7 +418,7 @@ def normalize(
         index=feature_df.index,
     )
 
-    normalized = meta_df.merge(feature_df, left_index=True, right_index=True)
+    normalized = pd.concat([meta_df, passthrough_image_df, feature_df], axis="columns")
 
     if feature_df.shape != profiles.loc[:, features].shape:
         error_detail = "The number of rows and columns in the feature dataframe does not match the original dataframe"
@@ -225,19 +426,11 @@ def normalize(
         raise ValueError(f"{error_detail}. This is likely a bug in {context}")
 
     if (normalized.shape[0] != profiles.shape[0]) or (
-        normalized.shape[1] != len(features) + len(meta_features)
+        normalized.shape[1]
+        != len(features) + len(meta_features) + len(passthrough_image_columns)
     ):
         error_detail = "The number of rows and columns in the normalized dataframe does not match the original dataframe"
         context = f"the `{method}` method in `pycytominer.normalize`"
         raise ValueError(f"{error_detail}. This is likely a bug in {context}.")
 
-    if output_file is not None:
-        output(
-            df=normalized,
-            output_filename=output_file,
-            output_type=output_type,
-            compression_options=compression_options,
-            float_format=float_format,
-        )
-    else:
-        return normalized
+    return normalized

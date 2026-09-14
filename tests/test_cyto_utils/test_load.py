@@ -1,19 +1,30 @@
+import gzip
 import os
 import pathlib
 import random
+import shutil
 import tempfile
+from io import StringIO
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
 
 from pycytominer.cyto_utils import (
+    load_cytotable_profiles,
     load_npz_features,
     load_npz_locations,
     load_platemap,
     load_profiles,
 )
-from pycytominer.cyto_utils.load import infer_delim, is_path_a_parquet_file
+from pycytominer.cyto_utils.load import (
+    infer_delim,
+    is_path_a_parquet_dataset_dir,
+    is_path_a_parquet_file,
+    resolve_cytotable_profiles_target,
+    resolve_parquet_path,
+)
 
 random.seed(123)
 
@@ -24,6 +35,9 @@ tmpdir = tempfile.gettempdir()
 output_data_file = os.path.join(tmpdir, "test_data.csv")
 output_data_comma_file = os.path.join(tmpdir, "test_data_comma.csv")
 output_data_parquet = os.path.join(tmpdir, "test_parquet.parquet")
+output_data_adata_hda5 = os.path.join(tmpdir, "test_adata.h5ad")
+output_data_adata_zarr = os.path.join(tmpdir, "test_adata.zarr")
+output_data_adata_zarr_zip = os.path.join(tmpdir, "test_adata.zarr.zip")
 output_data_gzip_file = f"{output_data_file}.gz"
 output_platemap_file = os.path.join(tmpdir, "test_platemap.csv")
 output_platemap_comma_file = os.path.join(tmpdir, "test_platemap_comma.csv")
@@ -37,9 +51,10 @@ ROOT_DIR = pathlib.Path(__file__).parents[2]
 # Example .npz file with real data
 example_npz_file = (
     ROOT_DIR
-    / "pycytominer"
-    / "data"
+    / "tests"
+    / "test_data"
     / "DeepProfiler_example_data"
+    / "Week1_22123"
     / "Week1_22123_B02_s1.npz"
 )
 
@@ -48,11 +63,24 @@ example_npz_file_locations = os.path.join(
     "..",
     "test_data",
     "DeepProfiler_example_data",
+    "SQ00014812_and_SQ00014813",
     "outputs",
     "results",
     "features",
     "SQ00014812",
     "A01_1.npz",
+)
+
+example_iceberg_root = (
+    ROOT_DIR / "tests" / "test_data" / "cytotable" / "examplehuman_iceberg_warehouse"
+)
+example_iceberg_warehouse = example_iceberg_root / "warehouse"
+example_iceberg_profiles_table = (
+    example_iceberg_warehouse / "profiles" / "joined_profiles"
+)
+example_iceberg_image_crops_table = example_iceberg_warehouse / "images" / "image_crops"
+example_ome_parquet = (
+    ROOT_DIR / "tests" / "test_data" / "cytodataframe" / "example.ome.parquet"
 )
 
 # Build data to use in tests
@@ -84,6 +112,24 @@ data_df.to_csv(output_data_comma_file, sep=",", index=False)
 data_df.to_csv(output_data_gzip_file, sep="\t", index=False, compression="gzip")
 data_df.to_parquet(output_data_parquet, engine="pyarrow")
 
+# create the anndata object with numeric features
+adata = ad.AnnData(X=(numeric_features := data_df.select_dtypes(include=["number"])))
+
+# Set the X column names for numeric features.
+# Within anndata, X is an abstraction
+# which represents a numeric data matrix
+# of observations (rows) and variables (columns).
+adata.var_names = numeric_features.columns
+
+# add the non-numeric features as obs
+adata.obs = data_df.select_dtypes(exclude=["number"])
+
+# serialize the file to disk
+adata.write_h5ad(output_data_adata_hda5)
+adata.write_zarr(output_data_adata_zarr)
+# create a zipped version of the zarr directory
+shutil.make_archive(output_data_adata_zarr, "zip", output_data_adata_zarr)
+
 platemap_df.to_csv(output_platemap_file, sep="\t", index=False)
 platemap_df.to_csv(output_platemap_comma_file, sep=",", index=False)
 platemap_df.to_csv(output_platemap_file_gzip, sep="\t", index=False, compression="gzip")
@@ -113,10 +159,48 @@ def test_infer_delim():
     assert delim == "\t"
 
 
+def test_infer_delim_raises_when_no_delimiter_is_detected(tmp_path):
+    single_column_file = tmp_path / "single_column.csv"
+    single_column_file.write_text("header\nvalue\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Could not determine the delimiter"):
+        infer_delim(single_column_file)
+
+
+def test_infer_delim_gzip_does_not_depend_on_plain_text_decode_error(monkeypatch):
+    real_open = open
+
+    def permissive_text_open(file, mode="r", *args, **kwargs):
+        if file == output_platemap_file_gzip and mode == "r":
+            return StringIO("\x1f\x8b\x00\x00")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", permissive_text_open)
+
+    assert infer_delim(output_platemap_file_gzip) == "\t"
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_infer_delim_uses_multiple_rows(tmp_path, compressed):
+    output_file = tmp_path / ("multirow.csv.gz" if compressed else "multirow.csv")
+    file_open = gzip.open if compressed else open
+
+    with file_open(output_file, "wt", encoding="utf-8") as csvfile:
+        csvfile.write("metadata preamble\na,b\n1,2\n")
+
+    assert infer_delim(output_file) == ","
+
+
 def test_load_profiles():
+    # tab-separated CSV
     profiles = load_profiles(output_data_file)
     pd.testing.assert_frame_equal(data_df, profiles)
 
+    # comma-separated CSV
+    profiles_comma = load_profiles(output_data_comma_file)
+    pd.testing.assert_frame_equal(data_df, profiles_comma)
+
+    # gzip-compressed tab-separated CSV
     profiles_gzip = load_profiles(output_data_gzip_file)
     pd.testing.assert_frame_equal(data_df, profiles_gzip)
 
@@ -125,6 +209,186 @@ def test_load_profiles():
 
     profiles_from_parquet = load_profiles(output_data_parquet)
     pd.testing.assert_frame_equal(data_df, profiles_from_parquet)
+
+    # loading anndata h5ad
+    adata_profile_test = load_profiles(output_data_adata_hda5)
+    pd.testing.assert_frame_equal(adata_profile_test, data_df)
+    # loading anndata zarr
+    adata_profile_test = load_profiles(output_data_adata_zarr)
+    pd.testing.assert_frame_equal(adata_profile_test, data_df)
+    # loading in-memory anndata
+    adata_profile_test = load_profiles(adata)
+    pd.testing.assert_frame_equal(adata_profile_test, data_df)
+
+    # loading parquet datasets from a CytoTable-style warehouse layout
+    profiles_from_iceberg_table = load_profiles(example_iceberg_profiles_table)
+    profiles_from_iceberg_data = load_profiles(example_iceberg_profiles_table / "data")
+    expected_iceberg_profiles = pd.read_parquet(
+        resolve_parquet_path(example_iceberg_profiles_table), engine="pyarrow"
+    )
+    pd.testing.assert_frame_equal(
+        profiles_from_iceberg_table, expected_iceberg_profiles
+    )
+    pd.testing.assert_frame_equal(profiles_from_iceberg_data, expected_iceberg_profiles)
+
+    profiles_from_iceberg_root = load_profiles(example_iceberg_root)
+    profiles_from_iceberg_warehouse = load_profiles(example_iceberg_warehouse)
+    pd.testing.assert_frame_equal(profiles_from_iceberg_root, expected_iceberg_profiles)
+    pd.testing.assert_frame_equal(
+        profiles_from_iceberg_warehouse, expected_iceberg_profiles
+    )
+
+    image_crops = load_profiles(example_iceberg_image_crops_table)
+    assert "ome_arrow_image" in image_crops.columns
+    assert image_crops["ome_arrow_image"].dtype == "object"
+
+    ome_parquet = load_profiles(example_ome_parquet)
+    assert "Image_FileName_GFP_OMEArrow_ORIG" in ome_parquet.columns
+    assert ome_parquet["Image_FileName_GFP_OMEArrow_ORIG"].dtype == "object"
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"load_profiles\(\) didn't find the path: .*missing\.parquet\.",
+    ):
+        load_profiles(ROOT_DIR / "tests" / "test_data" / "missing.parquet")
+
+
+def test_resolve_cytotable_profiles_target_ambiguous(tmp_path):
+    warehouse_root = tmp_path / "warehouse"
+    first_table = warehouse_root / "profiles" / "joined_profiles" / "data"
+    second_table = warehouse_root / "profiles" / "normalized_profiles" / "data"
+
+    first_table.mkdir(parents=True)
+    second_table.mkdir(parents=True)
+
+    data_df.to_parquet(first_table / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(second_table / "part-00000.parquet", engine="pyarrow")
+
+    with pytest.raises(ValueError, match="multiple parquet-backed profile tables"):
+        resolve_cytotable_profiles_target(tmp_path)
+
+    with pytest.raises(ValueError, match="multiple parquet-backed profile tables"):
+        load_profiles(tmp_path)
+
+
+def test_resolve_cytotable_profiles_target_warehouse_root():
+    resolved = resolve_cytotable_profiles_target(example_iceberg_warehouse)
+
+    assert resolved == (example_iceberg_warehouse, "profiles", "joined_profiles")
+
+
+def test_resolve_cytotable_profiles_target_project_root():
+    resolved = resolve_cytotable_profiles_target(example_iceberg_root)
+
+    assert resolved == (example_iceberg_warehouse, "profiles", "joined_profiles")
+
+
+def test_resolve_cytotable_profiles_target_prefers_unambiguous_warehouse_root(
+    tmp_path,
+):
+    # Guard against a project directory that contains both a malformed sibling
+    # ``profiles/`` tree and a valid ``warehouse/profiles/`` tree. Resolution
+    # should still succeed when exactly one warehouse-backed profile table is
+    # unambiguous.
+    malformed_profiles_root = tmp_path / "profiles"
+    first_table = malformed_profiles_root / "joined_profiles" / "data"
+    second_table = malformed_profiles_root / "normalized_profiles" / "data"
+    warehouse_table = tmp_path / "warehouse" / "profiles" / "joined_profiles" / "data"
+
+    first_table.mkdir(parents=True)
+    second_table.mkdir(parents=True)
+    warehouse_table.mkdir(parents=True)
+
+    data_df.to_parquet(first_table / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(second_table / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(warehouse_table / "part-00000.parquet", engine="pyarrow")
+
+    resolved = resolve_cytotable_profiles_target(tmp_path)
+
+    assert resolved == (tmp_path / "warehouse", "profiles", "joined_profiles")
+
+
+def test_resolve_cytotable_profiles_target_no_match(tmp_path):
+    tmp_path.mkdir(exist_ok=True)
+
+    assert resolve_cytotable_profiles_target(tmp_path) is None
+
+
+def test_resolve_cytotable_profiles_target_missing_path(tmp_path):
+    assert resolve_cytotable_profiles_target(tmp_path / "missing") is None
+
+
+def test_is_path_a_parquet_dataset_dir_strict(tmp_path):
+    parquet_dir = tmp_path / "parquet_dir"
+    parquet_dir.mkdir()
+    data_df.to_parquet(parquet_dir / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(parquet_dir / "part-00001.parquet", engine="pyarrow")
+
+    assert is_path_a_parquet_dataset_dir(parquet_dir)
+
+
+def test_is_path_a_parquet_dataset_dir_rejects_mixed_files(tmp_path):
+    mixed_dir = tmp_path / "mixed_dir"
+    mixed_dir.mkdir()
+    data_df.to_parquet(mixed_dir / "part-00000.parquet", engine="pyarrow")
+    (mixed_dir / "notes.txt").write_text("not parquet", encoding="utf-8")
+
+    assert not is_path_a_parquet_dataset_dir(mixed_dir)
+
+
+def test_resolve_parquet_path_missing_file(tmp_path):
+    assert resolve_parquet_path(tmp_path / "missing.parquet") is None
+
+
+def test_load_cytotable_profiles():
+    expected_profiles = pd.read_parquet(
+        resolve_parquet_path(example_iceberg_profiles_table), engine="pyarrow"
+    )
+
+    warehouse_profiles = load_cytotable_profiles(example_iceberg_warehouse)
+    root_profiles = load_cytotable_profiles(example_iceberg_root)
+
+    pd.testing.assert_frame_equal(warehouse_profiles, expected_profiles)
+    pd.testing.assert_frame_equal(root_profiles, expected_profiles)
+
+
+def test_load_cytotable_profiles_with_explicit_table_name_and_namespace():
+    expected_profiles = pd.read_parquet(
+        resolve_parquet_path(example_iceberg_profiles_table), engine="pyarrow"
+    )
+
+    warehouse_profiles = load_cytotable_profiles(
+        warehouse_path=example_iceberg_warehouse,
+        table_name="joined_profiles",
+        namespace="profiles",
+    )
+    root_profiles = load_cytotable_profiles(
+        warehouse_path=example_iceberg_root,
+        table_name="joined_profiles",
+        namespace="profiles",
+    )
+
+    pd.testing.assert_frame_equal(warehouse_profiles, expected_profiles)
+    pd.testing.assert_frame_equal(root_profiles, expected_profiles)
+
+
+def test_load_cytotable_profiles_rejects_missing_or_malformed_targets(tmp_path):
+    with pytest.raises(
+        FileNotFoundError,
+        # POSIX: "No such file or directory"; Windows: "cannot find the file"
+        match=r"No such file or directory|cannot find the file",
+    ):
+        load_cytotable_profiles(tmp_path / "missing")
+
+    malformed_root = tmp_path / "warehouse"
+    malformed_table = malformed_root / "profiles" / "joined_profiles"
+    malformed_table.mkdir(parents=True)
+    (malformed_table / "notes.txt").write_text("not parquet", encoding="utf-8")
+
+    with pytest.raises(
+        FileNotFoundError, match="Could not find a parquet-backed table"
+    ):
+        load_cytotable_profiles(malformed_root)
 
 
 def test_load_platemap():
@@ -140,6 +404,39 @@ def test_load_platemap():
     platemap_with_annotation = load_platemap(output_platemap_file, add_metadata_id=True)
     platemap_df.columns = [f"Metadata_{x}" for x in platemap_df.columns]
     pd.testing.assert_frame_equal(platemap_with_annotation, platemap_df)
+
+
+def test_load_platemap_explicit_sep():
+    """Explicit sep bypasses infer_delim, so this test runs on all platforms including Windows.
+
+    Uses a local expected DataFrame rather than the module-level platemap_df, which
+    test_load_platemap mutates in-place when it runs (adding Metadata_ prefixes).
+    """
+    expected = pd.DataFrame({
+        "well_position": ["A01", "A02", "A03", "B01", "B02", "B03"],
+        "gene": ["x", "y", "z"] * 2,
+    }).reset_index(drop=True)
+
+    # TSV file with explicit sep="\t"
+    pd.testing.assert_frame_equal(
+        load_platemap(output_platemap_file, add_metadata_id=False, sep="\t"), expected
+    )
+
+    # CSV file with explicit sep=","
+    pd.testing.assert_frame_equal(
+        load_platemap(output_platemap_comma_file, add_metadata_id=False, sep=","),
+        expected,
+    )
+
+    # Explicit sep also works alongside add_metadata_id=True
+    expected_annotated = expected.copy()
+    expected_annotated.columns = pd.Index([
+        f"Metadata_{x}" for x in expected_annotated.columns
+    ])
+    pd.testing.assert_frame_equal(
+        load_platemap(output_platemap_file, add_metadata_id=True, sep="\t"),
+        expected_annotated,
+    )
 
 
 def test_load_npz():
@@ -211,37 +508,23 @@ def test_load_npz():
 
 
 def test_is_path_a_parquet_file():
-    # checking parquet file
-    check_pass = is_path_a_parquet_file(output_data_parquet)
-    check_fail = is_path_a_parquet_file(output_data_file)
+    # checking parquet file returns True, CSV returns False
+    assert is_path_a_parquet_file(output_data_parquet)
+    assert not is_path_a_parquet_file(output_data_file)
 
-    # checking if the correct booleans are returned
-    assert check_pass
-    assert not check_fail
-
-    # loading in pandas dataframe from parquet file
+    # loading parquet via load_profiles produces the same result as pd.read_parquet
     parquet_df = pd.read_parquet(output_data_parquet)
-    parquet_profile_test = load_profiles(output_data_parquet)
-    pd.testing.assert_frame_equal(parquet_profile_test, parquet_df)
-
-    # loading csv file with new load_profile()
-    csv_df = pd.read_csv(output_data_comma_file)
-    csv_profile_test = load_profiles(output_data_comma_file)
-    pd.testing.assert_frame_equal(csv_profile_test, csv_df)
-
-    # checking if the same df is produced from parquet and csv files
-    pd.testing.assert_frame_equal(parquet_profile_test, csv_profile_test)
+    pd.testing.assert_frame_equal(load_profiles(output_data_parquet), parquet_df)
 
 
 def test_load_profiles_file_path_input():
-    """
-    The `load_profiles()` function will work input file arguments that resolve.
-    This test confirms that different input file types work as expected.
-    """
-    # All paths should resolve and result in the same data being loaded
-    data_file_os: str = os.path.join(tmpdir, "test_data.csv")
-    data_file_path: pathlib.Path = pathlib.Path(tmpdir, "test_data.csv")
-    data_file_purepath: pathlib.PurePath = pathlib.PurePath(tmpdir, "test_data.csv")
+    """str, pathlib.Path, and pathlib.PurePath inputs all resolve to the same data."""
+    # All path types should resolve and produce the same result
+    data_file_os: str = os.path.join(tmpdir, "test_parquet.parquet")
+    data_file_path: pathlib.Path = pathlib.Path(tmpdir, "test_parquet.parquet")
+    data_file_purepath: pathlib.PurePath = pathlib.PurePath(
+        tmpdir, "test_parquet.parquet"
+    )
 
     profiles_os = load_profiles(data_file_os)
     profiles_path = load_profiles(data_file_path)
@@ -250,7 +533,7 @@ def test_load_profiles_file_path_input():
     pd.testing.assert_frame_equal(profiles_os, profiles_path)
     pd.testing.assert_frame_equal(profiles_purepath, profiles_path)
 
-    # Testing non-existing file paths should result in expected behavior
-    data_file_not_exist: pathlib.Path = pathlib.Path(tmpdir, "file_not_exist.csv")
-    with pytest.raises(FileNotFoundError, match="No such file or directory"):
+    # Non-existing file path raises FileNotFoundError
+    data_file_not_exist: pathlib.Path = pathlib.Path(tmpdir, "file_not_exist.parquet")
+    with pytest.raises(FileNotFoundError, match="didn't find the path"):
         load_profiles(data_file_not_exist)

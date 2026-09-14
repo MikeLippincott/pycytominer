@@ -1,45 +1,41 @@
 name: Publish Python 🐍 distributions 📦 to PyPI and TestPyPI
-on: [release]
+on:
+  release:
+    # only publish to pypi when gh release is published
+    types: [published]
 
 env:
   LANG: "en_US.utf-8"
   LC_ALL: "en_US.utf-8"
   PYTHONIOENCODING: "UTF-8"
-  TARGET_PYTHON_VERSION: "3.9"
+  TARGET_PYTHON_VERSION: "3.10"
 
 jobs:
   build-and-publish:
     name: Build and publish Python 🐍 distributions
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          # We do not need to fetch all the history of the repository
-          # as commit being released is guaranteed to have a tag.
-          # poetry-dynamic-versioning will use that tag use to set the
-          # build version of the package.
-          fetch-depth: 1
+          # Full history is required for setuptools-scm to derive the version
+          # from the published release tag.
+          fetch-depth: 0
       - name: Setup base environment
         uses: ./.github/actions/setup-env
         with:
           python-version: ${{ env.TARGET_PYTHON_VERSION }}
           cache-pre-commit: false
           cache-venv: false
-          setup-poetry: true
+          setup-uv: true
           install-deps: false
       - name: Build 📦 distributions
         run: |
-          poetry build
-      - name: Publish any distribution 📦 to Test PyPI
+          uv build
+      - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          user: __token__
-          repository-url: https://test.pypi.org/legacy/
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
-      - name: Publish tagged distribution 📦 to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        if: startsWith(github.ref, 'refs/tags')
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}

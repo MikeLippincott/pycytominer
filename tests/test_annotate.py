@@ -3,6 +3,7 @@ import random
 import tempfile
 
 import pandas as pd
+import pytest
 
 from pycytominer.annotate import annotate
 
@@ -45,7 +46,8 @@ def test_annotate():
     # create expected result prior to annotate to distinguish modifications
     # performed by annotate to provided dataframes.
     expected_result = (
-        PLATEMAP_DF.merge(DATA_DF, left_on="well_position", right_on="Metadata_Well")
+        PLATEMAP_DF
+        .merge(DATA_DF, left_on="well_position", right_on="Metadata_Well")
         .rename(columns={"gene": "Metadata_gene"})
         .drop("well_position", axis="columns")
     )
@@ -57,6 +59,40 @@ def test_annotate():
     )
 
     pd.testing.assert_frame_equal(result, expected_result)
+
+
+def test_annotate_platemap_sep(tmp_path):
+    """platemap_sep bypasses infer_delim — runs on all platforms including Windows."""
+    # Write platemap as TSV and CSV to tmp_path
+    tsv_path = tmp_path / "platemap.tsv"
+    csv_path = tmp_path / "platemap.csv"
+    PLATEMAP_DF.to_csv(tsv_path, sep="\t", index=False)
+    PLATEMAP_DF.to_csv(csv_path, sep=",", index=False)
+
+    expected_result = (
+        PLATEMAP_DF
+        .merge(DATA_DF, left_on="well_position", right_on="Metadata_Well")
+        .rename(columns={"gene": "Metadata_gene"})
+        .drop("well_position", axis="columns")
+    )
+
+    # TSV platemap loaded via explicit platemap_sep
+    result_tsv = annotate(
+        profiles=DATA_DF,
+        platemap=str(tsv_path),
+        join_on=["Metadata_well_position", "Metadata_Well"],
+        platemap_sep="\t",
+    )
+    pd.testing.assert_frame_equal(result_tsv, expected_result)
+
+    # CSV platemap loaded via explicit platemap_sep
+    result_csv = annotate(
+        profiles=DATA_DF,
+        platemap=str(csv_path),
+        join_on=["Metadata_well_position", "Metadata_Well"],
+        platemap_sep=",",
+    )
+    pd.testing.assert_frame_equal(result_csv, expected_result)
 
 
 def test_annotate_platemap_naming():
@@ -103,18 +139,25 @@ def test_annotate_merge():
 
 
 def test_annotate_external():
-    # Test that the external_metadata
+    # Test to ensure external metadata columns are added to profile correctly
+    external_metadata_df = EXTERNAL_METADATA_DF.rename(
+        columns={
+            "gene": "Metadata_gene",
+            "pathway": "Metadata_pathway",
+            "time_h": "Metadata_time_h",
+        }
+    )
     expected_result = (
-        DATA_DF.merge(
+        DATA_DF
+        .merge(
             PLATEMAP_DF, left_on="Metadata_Well", right_on="well_position", how="left"
         )
-        .merge(EXTERNAL_METADATA_DF, left_on="gene", right_on="gene", how="left")
-        .rename(
-            columns={
-                "gene": "Metadata_gene",
-                "pathway": "Metadata_pathway",
-                "time_h": "Metadata_time_h",
-            }
+        .rename(columns={"gene": "Metadata_gene"})
+        .merge(
+            external_metadata_df,
+            left_on="Metadata_gene",
+            right_on="Metadata_gene",
+            how="left",
         )[
             [
                 "Metadata_gene",
@@ -130,11 +173,83 @@ def test_annotate_external():
     result = annotate(
         profiles=DATA_DF,
         platemap=PLATEMAP_DF,
-        external_metadata=EXTERNAL_METADATA_DF,
+        external_metadata=external_metadata_df,
         join_on=["Metadata_well_position", "Metadata_Well"],
-        external_join_left=["Metadata_gene"],
-        external_join_right=["Metadata_gene"],
+        external_join_on=["Metadata_gene"],
         add_metadata_id_to_platemap=True,
+    )
+
+    pd.testing.assert_frame_equal(result, expected_result)
+
+
+@pytest.mark.parametrize(
+    "external_metadata_cosmicqc_df",
+    [
+        pd.DataFrame({
+            "Image_Metadata_Plate": ["P1", "P1"],
+            "Image_Metadata_Well": ["A01", "A02"],
+            "Image_Metadata_Site": [1, 2],
+            "Metadata_qc_pass": [True, False],
+            "plain_column": ["needs_prefix", "needs_prefix"],
+        }),
+        pd.DataFrame({
+            "Image_Metadata_Plate": ["P1", "P1"],
+            "Image_Metadata_Well": ["A01", "A02"],
+            "Image_Metadata_Site": [1, 2],
+            "Metadata_qc_pass": [True, False],
+            "Metadata_plain_column": ["needs_prefix", "needs_prefix"],
+        }),
+    ],
+    ids=[
+        "unprefixed-external-metadata-before-cp-clean",
+        "prefixed-external-metadata-before-cp-clean",
+    ],
+)
+def test_annotate_external_parquet_merge_before_cp_clean(
+    tmp_path, external_metadata_cosmicqc_df
+):
+    # Test that parquet-backed external metadata can be merged in before
+    # cleaning CellProfiler metadata names.
+    profiles_df = pd.DataFrame({
+        "Image_Metadata_Plate": ["P1", "P1"],
+        "Image_Metadata_Well": ["A01", "A02"],
+        "Image_Metadata_Site": [1, 2],
+        "Cells_AreaShape_Area": [1.0, 2.0],
+    })
+    platemap_df = pd.DataFrame({
+        "Plate": ["P1", "P1"],
+        "Well": ["A01", "A02"],
+        "gene": ["x", "y"],
+    })
+    external_metadata_path = tmp_path / "qc.parquet"
+    external_metadata_cosmicqc_df.to_parquet(external_metadata_path, engine="pyarrow")
+
+    expected_result = pd.DataFrame({
+        "Metadata_gene": ["x", "y"],
+        "Metadata_Plate": ["P1", "P1"],
+        "Metadata_Well": ["A01", "A02"],
+        "Metadata_Site": [1, 2],
+        "Metadata_qc_pass": [True, False],
+        "Metadata_plain_column": ["needs_prefix", "needs_prefix"],
+        "Cells_AreaShape_Area": [1.0, 2.0],
+    })
+
+    result = annotate(
+        profiles=profiles_df,
+        platemap=platemap_df,
+        join_on=[
+            ["Metadata_Plate", "Metadata_Well"],
+            [
+                "Image_Metadata_Plate",
+                "Image_Metadata_Well",
+            ],
+        ],
+        external_metadata=str(external_metadata_path),
+        external_join_on=[
+            "Image_Metadata_Plate",
+            "Image_Metadata_Well",
+            "Image_Metadata_Site",
+        ],
     )
 
     pd.testing.assert_frame_equal(result, expected_result)
@@ -203,8 +318,8 @@ def test_output_type():
     parquet_df = pd.read_parquet(OUTPUT_FILE_PARQUET)
 
     # check to make sure the files were read in corrrectly as a pd.Dataframe
-    assert type(csv_df) == pd.DataFrame
-    assert type(parquet_df) == pd.DataFrame
+    assert isinstance(csv_df, pd.DataFrame)
+    assert isinstance(parquet_df, pd.DataFrame)
 
     # check to make sure both dataframes are the same regardless of the output_type
     pd.testing.assert_frame_equal(csv_df, parquet_df)

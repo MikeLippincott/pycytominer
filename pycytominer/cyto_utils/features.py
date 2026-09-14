@@ -2,46 +2,14 @@
 Utility function to manipulate cell profiler features
 """
 
-import os
+from typing import Union
+
 import pandas as pd
-from typing import Union, List
-
-blocklist_file = os.path.join(
-    os.path.dirname(__file__), "..", "data", "blocklist_features.txt"
-)
 
 
-def get_blocklist_features(blocklist_file=blocklist_file, population_df=None):
-    """Get a list of blocklist features.
-
-    Parameters
-    ----------
-    blocklist_file : path-like object
-        Location of the dataframe with features to exclude.
-    population_df : pandas.core.frame.DataFrame, optional
-        Profile dataframe used to subset blocklist features.
-
-    Returns
-    -------
-    blocklist_features : list of str
-        Features to exclude from downstream analysis.
-    """
-
-    blocklist = pd.read_csv(blocklist_file)
-
-    assert any(  # noqa: S101
-        x == "blocklist" for x in blocklist.columns
-    ), "one column must be named 'blocklist'"
-
-    blocklist_features = blocklist.blocklist.to_list()
-    if isinstance(population_df, pd.DataFrame):
-        population_features = population_df.columns.tolist()
-        blocklist_features = [x for x in blocklist_features if x in population_features]
-
-    return blocklist_features
-
-
-def label_compartment(cp_features, compartment, metadata_cols):
+def label_compartment(
+    cp_features: list[str], compartment: str, metadata_cols: list[str]
+) -> list[str]:
     """Assign compartment label to each features as a prefix.
 
     Parameters
@@ -59,12 +27,11 @@ def label_compartment(cp_features, compartment, metadata_cols):
         Recoded column names with appropriate metadata and compartment labels.
     """
 
-    compartment = compartment.Title()
+    compartment = compartment.title()
     avail_compartments = ["Cells", "Cytoplasm", "Nuceli", "Image", "Barcode"]
 
-    assert (  # noqa: S101
-        compartment in avail_compartments
-    ), f"provide valid compartment. One of: {avail_compartments}"
+    if compartment not in avail_compartments:
+        raise ValueError(f"provide valid compartment. One of: {avail_compartments}")
 
     cp_features = [
         f"Metadata_{x}" if x in metadata_cols else f"{compartment}_{x}"
@@ -75,28 +42,43 @@ def label_compartment(cp_features, compartment, metadata_cols):
 
 
 def infer_cp_features(
-    population_df,
-    compartments=["Cells", "Nuclei", "Cytoplasm"],
-    metadata=False,
-    image_features=False,
-):
-    """Given a dataframe, output features that we expect to be Cell Painting features.
+    population_df: pd.DataFrame,
+    compartments: Union[str, list[str]] = ["Cells", "Nuclei", "Cytoplasm"],
+    metadata: bool = False,
+    image_features: bool = False,
+) -> list[str]:
+    """Given CellProfiler output data read as a DataFrame, output feature column names as a list.
+
+    Inferred feature columns will match expected CellProfiler prefixes (for
+    example, ``Cells_``, ``Cytoplasm_``, and ``Nuclei_``). When
+    ``image_features=True``, the function excludes non-numeric ``Image_*``
+    columns from inferred features. This is important for use cases that
+    combine profile features with image payload columns under the ``Image_*``
+    prefix, such as OME-Arrow. The function also excludes columns with nested
+    object values, even if they use a CellProfiler-like prefix.
 
     Parameters
     ----------
-    population_df : pandas.core.frame.DataFrame
+    population_df : pd.DataFrame
         DataFrame from which features are to be inferred.
     compartments : list of str, default ["Cells", "Nuclei", "Cytoplasm"]
         Compartments from which Cell Painting features were extracted.
     metadata : bool, default False
         Whether or not to infer metadata features.
+        If metadata is set to True, find column names that begin with the `Metadata_` prefix.
+        This convention is expected by CellProfiler defaults.
     image_features : bool, default False
-        Whether or not the profiles contain image features.
+        Whether or not to include ``Image_*`` columns in inferred features.
+        When True, Pycytominer includes numeric image features alongside the
+        default CellProfiler compartments, while still excluding non-numeric
+        ``Image_*`` columns. This avoids treating image payload columns as
+        profile features in data layouts that store both under the same
+        ``Image_*`` prefix, such as OME-Arrow-backed tables.
 
     Returns
     -------
     features: list of str
-        List of Cell Painting features.
+        List of inferred Cell Painting feature column names.
     """
 
     compartments = convert_compartment_format_to_list(compartments)
@@ -107,27 +89,43 @@ def infer_cp_features(
 
     features = []
     for col in population_df.columns.tolist():
-        if any(col.startswith(x.title()) for x in compartments):
-            features.append(col)
+        if not any(col.startswith(x.title()) for x in compartments):
+            continue
+
+        # Exclude nested object payloads while allowing scalar object values.
+        if population_df[col].dtype == "object":
+            non_null_values = population_df[col].dropna()
+            if any(not pd.api.types.is_scalar(value) for value in non_null_values):
+                continue
+
+        if col.startswith("Image_") and not pd.api.types.is_numeric_dtype(
+            population_df[col]
+        ):
+            continue
+
+        features.append(col)
 
     if metadata:
         features = population_df.columns[
             population_df.columns.str.startswith("Metadata_")
         ].tolist()
 
-    assert (  # noqa: S101
-        len(features) > 0
-    ), "No CP features found. Are you sure this dataframe is from CellProfiler?"
+    if len(features) == 0:
+        raise ValueError(
+            "No features or metadata found. Pycytominer expects CellProfiler column names by default. "
+            "If you're using non-CellProfiler data, please do not 'infer' features. "
+            "Instead, check if the function has a `features` or `meta_features` parameter, and input column names manually."
+        )
 
     return features
 
 
-def count_na_features(population_df, features):
+def count_na_features(population_df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """Given a population dataframe and features, count how many nas per feature.
 
     Parameters
     ----------
-    population_df : pandas.core.frame.DataFrame
+    population_df : pd.DataFrame
         DataFrame of profiles.
     features : list of str
         Features present in the population dataframe.
@@ -141,24 +139,29 @@ def count_na_features(population_df, features):
 
 
 def drop_outlier_features(
-    population_df, features="infer", samples="all", outlier_cutoff=500
-):
+    population_df: pd.DataFrame,
+    features: Union[str, list[str]] = "infer",
+    samples: str = "all",
+    outlier_cutoff: Union[int, float] = 500,
+) -> list[str]:
     """Exclude a feature if its min or max absolute value is greater than the threshold.
 
     Parameters
     ----------
-    population_df : pandas.core.frame.DataFrame
+    population_df : pd.DataFrame
         DataFrame that includes metadata and observation features.
     features : list of str or str, default "infer"
-        Features present in the population dataframe. If "infer", then assume Cell Painting features are those that start with "Cells_", "Nuclei_", or "Cytoplasm_"
+        Features present in the population dataframe. If "infer",
+        then assume CellProfiler feature conventions
+        (start with ``Cells_``, ``Nuclei_``, or ``Cytoplasm_``)
     samples : str, default "all"
         List of samples to perform operation on. The function uses a pd.DataFrame.query()
         function, so you should  structure samples in this fashion. An example is
         "Metadata_treatment == 'control'" (include all quotes).
         If "all", use all samples to calculate.
     outlier_cutoff : int or float, default 500
-    see https://github.com/cytomining/pycytominer/issues/237 for details.
-        Threshold to remove features if absolute values is greater
+        Threshold to remove features if absolute value is greater.
+        See https://github.com/cytomining/pycytominer/issues/237 for details.
 
     Returns
     -------
@@ -166,19 +169,30 @@ def drop_outlier_features(
         Features greater than the threshold.
     """
 
-    # Subset dataframe
+    # Subset the DataFrame if specific samples are specified
+    # If "all", use the entire DataFrame without subsetting
     if samples != "all":
-        population_df.query(samples, inplace=True)
+        # Using pandas query to filter rows based on the conditions provided in the
+        # samples parameter
+        population_df = population_df.query(expr=samples)
 
+    # Infer  CellProfiler features if 'features' is set to 'infer'
     if features == "infer":
-        features = infer_cp_features(population_df)
-        population_df = population_df.loc[:, features]
-    else:
-        population_df = population_df.loc[:, features]
+        # Infer CellProfiler features
+        feature_list: list[str] = infer_cp_features(population_df)
 
+    else:
+        # Subset the DataFrame to only include the features of interest
+        # this would be more tailored to non-CellProfiler features
+        feature_list = [features] if isinstance(features, str) else list(features)
+
+    population_df = population_df.loc[:, feature_list]
+
+    # Get the max and min values for each feature
     max_feature_values = population_df.max().abs()
     min_feature_values = population_df.min().abs()
 
+    # Identify features with max or min values greater than the outlier cutoff
     outlier_features = max_feature_values[
         (max_feature_values > outlier_cutoff) | (min_feature_values > outlier_cutoff)
     ].index.tolist()
@@ -187,8 +201,8 @@ def drop_outlier_features(
 
 
 def convert_compartment_format_to_list(
-    compartments: Union[List[str], str],
-) -> List[str]:
+    compartments: Union[list[str], str],
+) -> list[str]:
     """Converts compartment to a list.
 
     Parameters

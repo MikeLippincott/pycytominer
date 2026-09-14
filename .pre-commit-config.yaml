@@ -1,24 +1,46 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: "v0.3.4"
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.16.4"
     hooks:
-      - id: ruff
+    -   id: ruff-check
         exclude: tutorials/nbconverted/
-      - id: ruff-format
+    -   id: ruff-format
         exclude: tutorials/nbconverted/
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: "v2.7.1"
+-   repo: https://github.com/pre-commit/mirrors-prettier
+    rev: "v3.1.0"
     hooks:
-      - id: prettier
-  - repo: https://github.com/python-poetry/poetry
-    rev: "1.5.1"
+    -   id: prettier
+        exclude: .pre-commit-config.yaml
+-   repo: local
     hooks:
-      - id: poetry-check
-  - repo: https://github.com/rhysd/actionlint
-    rev: v1.6.26
+    -   id: uv-lock-check
+        name: uv lock check
+        entry: python -m uv lock --check
+        language: python
+        additional_dependencies: [uv]
+        pass_filenames: false
+-   repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
     hooks:
-      - id: actionlint
-  - repo: https://github.com/hadolint/hadolint
-    rev: v2.12.1-beta
+    -   id: actionlint
+-   repo: https://github.com/hadolint/hadolint
+    rev: v2.15.1
     hooks:
-      - id: hadolint-docker
+    -   id: hadolint-docker
+-   repo: https://github.com/tox-dev/pyproject-fmt
+    rev: "v2.28.1"
+    hooks:
+    -   id: pyproject-fmt
+        # tomli is vendored inside pyproject-fmt but not declared as a direct
+        # dependency, so pre-commit's isolated env doesn't install it on
+        # Python 3.10 (tomllib is stdlib only from 3.11+). Remove once fixed upstream.
+        additional_dependencies: ["tomli>=2.4.1"]
+    # validates CITATION.cff file formatting expectations
+-   repo: https://github.com/citation-file-format/cffconvert
+    rev: b6045d78aac9e02b039703b030588d54d53262ac
+    hooks:
+    -   id: validate-cff
+-   repo: https://github.com/software-gardening/almanack
+    rev: v0.1.17
+    hooks:
+    -   id: almanack-check

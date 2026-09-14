@@ -2,20 +2,24 @@
 Miscellaneous utility functions
 """
 
+import inspect
 import os
 import warnings
+from functools import wraps
+from typing import Callable, Literal, Union, cast
+
 import numpy as np
 import pandas as pd
-from pycytominer.cyto_utils.features import (
-    convert_compartment_format_to_list,
-)
+
+from pycytominer.cyto_utils.features import convert_compartment_format_to_list
+from pycytominer.cyto_utils.output import output
 
 default_metadata_file = os.path.join(
     os.path.dirname(__file__), "..", "data", "metadata_feature_dictionary.txt"
 )
 
 
-def get_default_compartments():
+def get_default_compartments() -> list[str]:
     """Returns default compartments.
 
     Returns
@@ -28,7 +32,7 @@ def get_default_compartments():
     return ["cells", "cytoplasm", "nuclei"]
 
 
-def check_compartments(compartments):
+def check_compartments(compartments: Union[str, list[str]]):
     """Checks if the input compartments are noncanonical compartments.
 
     Parameters
@@ -59,13 +63,15 @@ def check_compartments(compartments):
         warnings.warn(warn_str)
 
 
-def load_known_metadata_dictionary(metadata_file=default_metadata_file):
+def load_known_metadata_dictionary(
+    metadata_file: str = default_metadata_file,
+) -> dict[str, list[str]]:
     """From a tab separated text file (two columns: ["compartment", "feature"]), load
     previously known metadata columns per compartment.
 
     Parameters
     ----------
-    metadata_file : str, optional
+    metadata_file : str
         File location of the metadata text file. Uses a default dictionary if you do not specify.
 
     Returns
@@ -75,7 +81,7 @@ def load_known_metadata_dictionary(metadata_file=default_metadata_file):
 
     """
 
-    metadata_dict = {}
+    metadata_dict: dict[str, list[str]] = {}
     with open(metadata_file) as meta_fh:
         next(meta_fh)
         for line in meta_fh:
@@ -89,7 +95,7 @@ def load_known_metadata_dictionary(metadata_file=default_metadata_file):
     return metadata_dict
 
 
-def check_correlation_method(method):
+def check_correlation_method(method: str) -> Literal["pearson", "kendall", "spearman"]:
     """Confirm that the input method is currently supported.
 
     Parameters
@@ -106,14 +112,16 @@ def check_correlation_method(method):
 
     method = method.lower()
     avail_methods = ["pearson", "spearman", "kendall"]
-    assert (  # noqa: S101
-        method in avail_methods
-    ), f"method {method} not supported, select one of {avail_methods}"
 
-    return method
+    if method not in avail_methods:
+        raise ValueError(
+            f"method {method} not supported, select one of {avail_methods}"
+        )
+
+    return cast(Literal["pearson", "kendall", "spearman"], method)
 
 
-def check_aggregate_operation(operation):
+def check_aggregate_operation(operation: str) -> str:
     """Confirm that the input operation for aggregation is currently supported.
 
     Parameters
@@ -130,14 +138,16 @@ def check_aggregate_operation(operation):
 
     operation = operation.lower()
     avail_ops = ["mean", "median"]
-    assert (  # noqa: S101
-        operation in avail_ops
-    ), f"operation {operation} not supported, select one of {avail_ops}"
+
+    if operation not in avail_ops:
+        raise ValueError(
+            f"operation {operation} not supported, select one of {avail_ops}"
+        )
 
     return operation
 
 
-def check_consensus_operation(operation):
+def check_consensus_operation(operation: str) -> str:
     """Confirm that the input operation for consensus is currently supported.
 
     Parameters
@@ -154,17 +164,72 @@ def check_consensus_operation(operation):
 
     operation = operation.lower()
     avail_ops = ["modz"]  # All aggregation operations are also supported
+
     try:
         operation = check_aggregate_operation(operation)
-    except AssertionError:
-        assert (  # noqa: S101
-            operation in avail_ops
-        ), f"operation {operation} not supported, select one of {avail_ops} or see aggregate.py"
+
+    except ValueError:
+        if operation not in avail_ops:
+            raise ValueError(
+                f"operation {operation} not supported, select one of {avail_ops} or see aggregate.py"
+            )
 
     return operation
 
 
-def check_fields_of_view_format(fields_of_view):
+def write_to_file_if_user_specifies_output_details(
+    func: Callable[..., Union[pd.DataFrame, str]],
+) -> Callable[..., Union[pd.DataFrame, str]]:
+    """Decorate a function to optionally write its output to disk.
+
+    The decorator intercepts common output-related keyword arguments
+    (``output_file``, ``output_type``, ``compression_options``, ``float_format``)
+    from the decorated function call. The wrapped function should return a
+    :class:`pandas.DataFrame` when ``output_file`` is provided; the DataFrame is
+    written using :func:`pycytominer.cyto_utils.output` and the resulting path is
+    returned instead.
+    """
+
+    signature = inspect.signature(func)
+
+    # wraps the function to preserve docstring and function name
+    @wraps(func)
+    def wrapper(*args, **kwargs) -> Union[pd.DataFrame, str]:
+        # bind the passed arguments to the function's signature
+        bound_arguments = signature.bind_partial(*args, **kwargs)
+        # fill in default values for missing arguments
+        bound_arguments.apply_defaults()
+
+        # extract output-related arguments
+        output_file = bound_arguments.arguments.pop("output_file", None)
+        output_type = bound_arguments.arguments.pop("output_type", None)
+        compression_options = bound_arguments.arguments.pop("compression_options", None)
+        float_format = bound_arguments.arguments.pop("float_format", None)
+
+        # call the original function with the remaining arguments
+        result = func(**bound_arguments.arguments)
+
+        # if no output file is specified, return the DataFrame directly
+        if output_file is None:
+            return result
+
+        # write the DataFrame to file and return the file path
+        return output(
+            # note: we cast here because mypy cannot
+            # infer that result is a DataFrame (not str)
+            df=cast(pd.DataFrame, result),
+            output_filename=output_file,
+            output_type=output_type,
+            compression_options=compression_options,
+            float_format=float_format,
+        )
+
+    return wrapper
+
+
+def check_fields_of_view_format(
+    fields_of_view: Union[str, list[int]],
+) -> Union[str, list[int]]:
     """Confirm that the input fields of view is valid.
 
     Parameters
@@ -198,7 +263,9 @@ def check_fields_of_view_format(fields_of_view):
         return fields_of_view
 
 
-def check_fields_of_view(data_fields_of_view, input_fields_of_view):
+def check_fields_of_view(
+    data_fields_of_view: list[int], input_fields_of_view: list[int]
+):
     """Confirm that the input list of fields of view is a subset of the list of fields of view in the image table.
 
     Parameters
@@ -215,17 +282,15 @@ def check_fields_of_view(data_fields_of_view, input_fields_of_view):
 
     """
 
-    try:
-        assert len(  # noqa: S101
-            list(np.intersect1d(data_fields_of_view, input_fields_of_view))
-        ) == len(input_fields_of_view)
-    except AssertionError:
+    if not len(list(np.intersect1d(data_fields_of_view, input_fields_of_view))) == len(
+        input_fields_of_view
+    ):
         raise ValueError(
             "Some of the input fields of view are not present in the image table."
         )
 
 
-def check_image_features(image_features, image_columns):
+def check_image_features(image_features: list[str], image_columns: list[str]):
     """Confirm that the input list of image features are present in the image table
 
     Parameters
@@ -248,25 +313,28 @@ def check_image_features(image_features, image_columns):
     else:
         level = 0
 
-    try:
-        assert all(  # noqa: S101
-            feature in list({img_col.split("_")[level] for img_col in image_columns})
-            for feature in image_features
-        )
-    except AssertionError:
+    if not all(
+        feature in list({img_col.split("_")[level] for img_col in image_columns})
+        for feature in image_features
+    ):
         raise ValueError(
             "Some of the input image features are not present in the image table."
         )
 
 
-def extract_image_features(image_feature_categories, image_df, image_cols, strata):
+def extract_image_features(
+    image_feature_categories: list[str],
+    image_df: pd.DataFrame,
+    image_cols: list[str],
+    strata: list[str],
+) -> pd.DataFrame:
     """Confirm that the input list of image features categories are present in the image table and then extract those features.
 
     Parameters
     ----------
     image_feature_categories : list of str
         Input image feature groups to extract from the image table.
-    image_df : pandas.core.frame.DataFrame
+    image_df : pd.DataFrame
         Image dataframe.
     image_cols : list of str
         Columns to select from the image table.
@@ -275,10 +343,8 @@ def extract_image_features(image_feature_categories, image_df, image_cols, strat
 
     Returns
     -------
-    image_features_df : pandas.core.frame.DataFrame
+    image_features_df : pd.DataFrame
         Dataframe with extracted image features.
-    image_feature_categories : list of str
-        Correctly formatted image feature categories.
 
     """
 
@@ -294,14 +360,14 @@ def extract_image_features(image_feature_categories, image_df, image_cols, strat
 
     image_features_df = image_df[image_features]
 
-    image_features_df.columns = [
+    image_features_df.columns = pd.Index([
         f"Image_{x}"
         if not x.startswith("Image_") and not x.startswith("Count_")
         else f"Metadata_{x}"
         if x.startswith("Count_")
         else x
         for x in image_features_df.columns
-    ]
+    ])
 
     # Add image_cols and strata to the dataframe
     image_features_df = pd.concat(
@@ -311,34 +377,39 @@ def extract_image_features(image_feature_categories, image_df, image_cols, strat
     return image_features_df
 
 
-def get_pairwise_correlation(population_df, method="pearson"):
+def get_pairwise_correlation(
+    population_df: pd.DataFrame, method: str = "pearson"
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Given a population dataframe, calculate all pairwise correlations.
 
     Parameters
     ----------
-    population_df : pandas.core.frame.DataFrame
+    population_df : pd.DataFrame
         Includes metadata and observation features.
     method : str, default "pearson"
         Which correlation matrix to use to test cutoff.
     Returns
     -------
-    list of str
-        Features to exclude from the population_df.
-
+    tuple of (pd.DataFrame, pd.DataFrame)
+        A tuple of two DataFrames. The first is a symmetrical correlation matrix.
+        The second is a long format DataFrame of pairwise correlations.
     """
 
     # Check that the input method is supported
-    method = check_correlation_method(method)
+    corrected_method: Literal["pearson", "kendall", "spearman"] = (
+        check_correlation_method(method)
+    )
 
     # Get a symmetrical correlation matrix. Use numpy for non NaN/Inf matrices.
     has_nan = np.any(np.isnan(population_df.values))
     has_inf = np.any(np.isinf(population_df.values))
-    if method == "pearson" and not (has_nan or has_inf):
+    if corrected_method == "pearson" and not (has_nan or has_inf):
         pop_names = population_df.columns
-        data_cor_df = np.corrcoef(population_df.transpose())
-        data_cor_df = pd.DataFrame(data_cor_df, index=pop_names, columns=pop_names)
+        data_cor_df = pd.DataFrame(
+            np.corrcoef(population_df.transpose()), index=pop_names, columns=pop_names
+        )
     else:
-        data_cor_df = population_df.corr(method=method)
+        data_cor_df = population_df.corr(method=corrected_method)
 
     # Create a copy of the dataframe to generate upper triangle of zeros
     data_cor_natri_df = data_cor_df.copy()
@@ -351,6 +422,6 @@ def get_pairwise_correlation(population_df, method="pearson"):
     # Acquire pairwise correlations in a long format
     # Note that we are using the NaN upper triangle DataFrame
     pairwise_df = data_cor_natri_df.stack().reset_index()
-    pairwise_df.columns = ["pair_a", "pair_b", "correlation"]
+    pairwise_df.columns = pd.Index(["pair_a", "pair_b", "correlation"])
 
     return data_cor_df, pairwise_df

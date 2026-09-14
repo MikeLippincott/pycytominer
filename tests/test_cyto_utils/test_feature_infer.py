@@ -39,10 +39,10 @@ def test_feature_infer():
 
 
 def test_feature_infer_nocp():
-    with pytest.raises(AssertionError) as nocp:
+    with pytest.raises(ValueError) as nocp:
         infer_cp_features(population_df=non_cp_data_df)
 
-    assert "No CP features found." in str(nocp.value)
+    assert "No features or metadata found." in str(nocp.value)
 
 
 def test_metadata_feature_infer():
@@ -75,3 +75,40 @@ def test_feature_infer_image():
     ]
 
     assert features == expected
+
+
+def test_feature_infer_image_ignores_object_columns():
+    object_image_df = pd.DataFrame({
+        "Image_Feature_1": [1.0, 2.0, 3.0],
+        "Image_FileName_DNA": ["a.tif", "b.tif", "c.tif"],
+        "Image_FileName_DNA_OMEArrow_ORIG": [{"a": 1}, {"a": 2}, {"a": 3}],
+        "Metadata_ImageNumber": [1, 2, 3],
+    })
+
+    features = infer_cp_features(population_df=object_image_df, image_features=True)
+
+    assert features == ["Image_Feature_1"]
+
+
+def test_feature_infer_image_excludes_nested_object_columns_when_enabled():
+    object_image_df = pd.DataFrame({
+        "Image_Feature_1": [1.0, 2.0, 3.0],
+        "Image_Nested_Payload": [{"a": 1}, {"a": 2}, {"a": 3}],
+        "Metadata_ImageNumber": [1, 2, 3],
+    })
+
+    features = infer_cp_features(population_df=object_image_df, image_features=True)
+
+    assert features == ["Image_Feature_1"]
+
+
+def test_feature_infer_excludes_nested_object_columns_without_image_prefix():
+    object_feature_df = pd.DataFrame({
+        "Cells_AreaShape_Area": ["1", "2", "3"],
+        "Cells_OMEArrow_Payload": [{"a": 1}, {"a": 2}, {"a": 3}],
+        "Metadata_ImageNumber": [1, 2, 3],
+    })
+
+    features = infer_cp_features(population_df=object_feature_df)
+
+    assert features == ["Cells_AreaShape_Area"]

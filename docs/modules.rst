@@ -1,7 +1,12 @@
-pycytominer
-===========
+API Reference
+=============
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 2
 
-   pycytominer
+   pycytominer.aggregate
+   pycytominer.annotate
+   pycytominer.normalize
+   pycytominer.feature_select
+   pycytominer.consensus
+   pycytominer.cyto_utils

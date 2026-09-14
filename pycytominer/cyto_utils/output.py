@@ -2,7 +2,7 @@
 Utility function to compress output data
 """
 
-from typing import Dict, Union, Optional
+from typing import Any, Literal, Optional, Union
 
 import pandas as pd
 
@@ -12,12 +12,17 @@ COMPRESS_OPTIONS = ["gzip", None]
 def output(
     df: pd.DataFrame,
     output_filename: str,
-    output_type: str = "csv",
+    output_type: Literal[
+        "csv", "parquet", "anndata_h5ad", "anndata_zarr", None
+    ] = "csv",
     sep: str = ",",
     float_format: Optional[str] = None,
-    compression_options: Union[str, Dict] = {"method": "gzip", "mtime": 1},
+    compression_options: Optional[Union[str, dict[str, Any]]] = {
+        "method": "gzip",
+        "mtime": 1,
+    },
     **kwargs,
-):
+) -> str:
     """Given an output file and compression options, write file to disk
 
     Parameters
@@ -45,39 +50,45 @@ def output(
 
     Examples
     --------
-    import pandas as pd
-    from pycytominer.cyto_utils import output
+    .. code-block:: python
 
-    data_df = pd.concat(
-        [
-            pd.DataFrame(
-                {
-                    "Metadata_Plate": "X",
-                    "Metadata_Well": "a",
-                    "Cells_x": [0.1, 0.3, 0.8],
-                    "Nuclei_y": [0.5, 0.3, 0.1],
-                }
-            ),
-            pd.DataFrame(
-                {
-                    "Metadata_Plate": "X",
-                    "Metadata_Well": "b",
-                    "Cells_x": [0.4, 0.2, -0.5],
-                    "Nuclei_y": [-0.8, 1.2, -0.5],
-                }
-            ),
-        ]
-    ).reset_index(drop=True)
+        import pandas as pd
+        from pycytominer.cyto_utils import output
 
-    output_file = "test.csv.gz"
-    output(
-        df=data_df,
-        output_filename=output_file,
-        sep=",",
-        compression_options={"method": "gzip", "mtime": 1},
-        float_format=None,
-    )
+        data_df = pd.concat(
+            [
+                pd.DataFrame(
+                    {
+                        "Metadata_Plate": "X",
+                        "Metadata_Well": "a",
+                        "Cells_x": [0.1, 0.3, 0.8],
+                        "Nuclei_y": [0.5, 0.3, 0.1],
+                    }
+                ),
+                pd.DataFrame(
+                    {
+                        "Metadata_Plate": "X",
+                        "Metadata_Well": "b",
+                        "Cells_x": [0.4, 0.2, -0.5],
+                        "Nuclei_y": [-0.8, 1.2, -0.5],
+                    }
+                ),
+            ]
+        ).reset_index(drop=True)
+
+        output_file = "test.csv.gz"
+        output(
+            df=data_df,
+            output_filename=output_file,
+            sep=",",
+            compression_options={"method": "gzip", "mtime": 1},
+            float_format=None,
+        )
     """
+
+    # ensure a default output type
+    if output_type is None:
+        output_type = "csv"
 
     if output_type == "csv":
         compression_options = set_compression_method(compression=compression_options)
@@ -95,10 +106,18 @@ def output(
         # raising errors and tested through Pandas, PyArrow, etc. as necessary.
         df.to_parquet(path=output_filename, compression="snappy")
 
+    # anndata branch for `anndata_h5ad` and `anndata_zarr`
+    elif "anndata" in output_type:
+        from pycytominer.cyto_utils.anndata_utils import write_anndata
+
+        output_filename = write_anndata(
+            df=df, output_filename=output_filename, output_type=output_type
+        )
+
     return output_filename
 
 
-def set_compression_method(compression: Union[str, Dict]):
+def set_compression_method(compression: Optional[Union[str, dict]]) -> dict[str, Any]:
     """Set the compression options
 
     Parameters
@@ -136,6 +155,7 @@ def check_compression_method(compression: str):
     None
         Asserts available options
     """
-    assert (  # noqa: S101
-        compression in COMPRESS_OPTIONS
-    ), f"{compression} is not supported, select one of {COMPRESS_OPTIONS}"
+    if compression not in COMPRESS_OPTIONS:
+        raise ValueError(
+            f"{compression} is not supported, select one of {COMPRESS_OPTIONS}"
+        )

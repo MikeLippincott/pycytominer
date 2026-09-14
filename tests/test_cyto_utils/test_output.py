@@ -7,6 +7,7 @@ import time
 import pandas as pd
 import pytest
 
+from pycytominer.cyto_utils.anndata_utils import is_anndata
 from pycytominer.cyto_utils.output import (
     check_compression_method,
     output,
@@ -56,6 +57,20 @@ def test_output_default():
         result, DATA_DF, check_names=False, check_exact=False, atol=1e-3
     )
 
+    # test with an output_type of None
+    output_result = output(
+        df=DATA_DF,
+        output_filename=output_filename,
+        compression_options=TEST_COMPRESSION_OPTIONS,
+        float_format=None,
+        output_type=None,
+    )
+    result = pd.read_csv(output_result)
+
+    pd.testing.assert_frame_equal(
+        result, DATA_DF, check_names=False, check_exact=False, atol=1e-3
+    )
+
 
 def test_output_tsv():
     # Test input filename of writing a tab separated file
@@ -95,6 +110,38 @@ def test_output_parquet():
     )
 
 
+@pytest.mark.parametrize(
+    "output_type,output_filename,expected_result",
+    [
+        # anndata h5ad
+        ("anndata_h5ad", "example.h5ad", "h5ad"),
+        # anndata zarr
+        ("anndata_zarr", "example.zarr", "zarr"),
+        # parquet
+        ("parquet", "example.parquet", None),
+    ],
+)
+def test_output_anndata(
+    tmp_path: pathlib.Path, output_type: str, output_filename: str, expected_result: str
+):
+    """
+    Tests using output function with anndata type
+    """
+
+    output_path = tmp_path / "test_output_anndata"
+
+    # test with base output arguments and
+    # kwargs output arguments for pd.DataFrame.to_parquet
+    output_result = output(
+        df=DATA_DF,
+        output_filename=output_path,
+        output_type=output_type,
+    )
+
+    assert pathlib.Path(output_result).exists()
+    assert is_anndata(output_result) == expected_result
+
+
 def test_output_none():
     output_filename = pathlib.Path(f"{TMPDIR}/test_output_none.csv")
     compression = None
@@ -126,8 +173,9 @@ def test_output_exception():
 def test_check_set_compression():
     check_compression_method(compression="gzip")
 
-    with pytest.raises(AssertionError) as e:
+    with pytest.raises(ValueError) as e:
         check_compression_method(compression="THIS WILL NOT WORK")
+
     assert "not supported" in str(e.value)
 
     compression = set_compression_method(compression="gzip")
@@ -142,14 +190,16 @@ def test_check_set_compression():
     compression = set_compression_method(compression={"method": None, "mtime": 1})
     assert compression == {"method": None, "mtime": 1}
 
-    with pytest.raises(AssertionError) as e:
+    with pytest.raises(ValueError) as e:
         compression = set_compression_method(compression="THIS WILL NOT WORK")
+
     assert "not supported" in str(e.value)
 
-    with pytest.raises(AssertionError) as e:
+    with pytest.raises(ValueError) as e:
         compression = set_compression_method(
             compression={"method": "THIS WILL NOT WORK"}
         )
+
     assert "not supported" in str(e.value)
 
 

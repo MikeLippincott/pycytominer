@@ -2,41 +2,48 @@
 Aggregate profiles based on given grouping variables.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
 
-from pycytominer.cyto_utils import (
-    check_aggregate_operation,
-    infer_cp_features,
-    output,
-)
+from pycytominer.cyto_utils import check_aggregate_operation, infer_cp_features
+from pycytominer.cyto_utils.util import write_to_file_if_user_specifies_output_details
 
 
+@write_to_file_if_user_specifies_output_details
 def aggregate(
     population_df: pd.DataFrame,
-    strata: List[str] = ["Metadata_Plate", "Metadata_Well"],
-    features: Union[List[str], str] = "infer",
+    strata: list[str] = ["Metadata_Plate", "Metadata_Well"],
+    features: Union[list[str], str] = "infer",
+    image_features: bool = False,
     operation: str = "median",
     output_file: Optional[str] = None,
-    output_type: Optional[str] = "csv",
+    output_type: Literal[
+        "csv", "parquet", "anndata_h5ad", "anndata_zarr", None
+    ] = "csv",
     compute_object_count: bool = False,
     object_feature: str = "Metadata_ObjectNumber",
     subset_data_df: Optional[pd.DataFrame] = None,
-    compression_options: Optional[Union[str, Dict[str, Any]]] = None,
+    compression_options: Optional[Union[str, dict[str, Any]]] = None,
     float_format: Optional[str] = None,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame:
     """Combine population dataframe variables by strata groups using given operation.
 
     Parameters
     ----------
-    population_df : pandas.core.frame.DataFrame
+    population_df : pd.DataFrame
         DataFrame to group and aggregate.
     strata : list of str, default ["Metadata_Plate", "Metadata_Well"]
         Columns to groupby and aggregate.
     features : list of str, default "infer"
         List of features that should be aggregated.
+    image_features : bool, default False
+        Whether to include inferred ``Image_*`` feature columns. When True,
+        Pycytominer preserves numeric image-level measurements while excluding
+        non-numeric ``Image_*`` columns, which helps avoid treating image
+        payload columns as profile features in mixed tables such as
+        OME-Arrow-backed inputs.
     operation : str, default "median"
         How the data is aggregated. Currently only supports one of ['mean', 'median'].
     output_file : str or file handle, optional
@@ -49,7 +56,7 @@ def aggregate(
         Whether or not to compute object counts.
     object_feature : str, default "Metadata_ObjectNumber"
         Object number feature. Only used if compute_object_count=True.
-    subset_data_df : pandas.core.frame.DataFrame
+    subset_data_df : pd.DataFrame
         How to subset the input.
     compression_options : str or dict, optional
         Contains compression options as input to
@@ -61,11 +68,18 @@ def aggregate(
 
     Returns
     -------
-    population_df : pandas.core.frame.DataFrame, optional
+    pd.DataFrame
         DataFrame of aggregated features. If output_file=None, then return the
-        DataFrame. If you specify output_file, then write to file and do not return
-        data.
+        DataFrame. If you specify output_file, profiles will be written on disk
+        based on provided output_file path.
 
+    Notes
+    -----
+    Parameters: `output_file`, `output_type`, `compression_options`, and `float_format`
+    are passed as kwargs to the `write_to_file_if_user_specifies_output_details` decorator,
+    which handles writing the output DataFrame to file if the user specifies output
+    details. If `output_file` is not specified, the function will return the aggregated
+    DataFrame instead of writing to file.
     """
 
     # Check that the operation is supported
@@ -83,7 +97,8 @@ def aggregate(
     # Only extract single object column in preparation for count
     if compute_object_count:
         count_object_df = (
-            population_df.loc[:, np.union1d(strata, [object_feature])]
+            population_df
+            .loc[:, list(np.union1d(strata, [object_feature]))]
             .groupby(strata)[object_feature]
             .count()
             .reset_index()
@@ -91,8 +106,10 @@ def aggregate(
         )
 
     if features == "infer":
-        features = infer_cp_features(population_df)
-    population_df = population_df[features]
+        features = infer_cp_features(population_df, image_features=image_features)
+
+    # recast as dataframe to protect against scenarios where a series may be returned
+    population_df = pd.DataFrame(population_df[features])
 
     # Fix dtype of input features (they should all be floats!)
     population_df = population_df.astype(float)
@@ -101,7 +118,9 @@ def aggregate(
     population_df = pd.concat([strata_df, population_df], axis="columns")
 
     # Perform aggregating function
-    population_df = population_df.groupby(strata, dropna=False)
+    # Note: type ignore added below to address the change in variable types for
+    # label `population_df`.
+    population_df = population_df.groupby(strata, dropna=False)  # type: ignore[assignment]
 
     if operation == "median":
         population_df = population_df.median().reset_index()
@@ -118,15 +137,6 @@ def aggregate(
         for column in population_df.columns
         if column in ["ImageNumber", "ObjectNumber"]
     ]:
-        population_df = population_df.drop([columns_to_drop], axis="columns")
+        population_df = population_df.drop(columns=columns_to_drop, axis="columns")
 
-    if output_file is not None:
-        output(
-            df=population_df,
-            output_filename=output_file,
-            output_type=output_type,
-            compression_options=compression_options,
-            float_format=float_format,
-        )
-    else:
-        return population_df
+    return population_df

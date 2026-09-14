@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest an idea to enhance the current functionality of pycytominer.
+description: Suggest an idea to enhance the current functionality of Pycytominer.
 title: "FeatureRequest: "
 labels: [enhancement]
 
@@ -19,7 +19,7 @@ body:
     attributes:
       label: General description of the proposed functionality
       description: >
-        Please provide a brief description of the proposed functionality, including whether it addresses an existing issue, and explain how it will enhance pycytominer.
+        Please provide a brief description of the proposed functionality, including whether it addresses an existing issue, and explain how it will enhance Pycytominer.
     validations:
       required: true
   - type: textarea
@@ -42,3 +42,14 @@ body:
       label: Additional information
       description: >
         Provide additional information or context.
+  - type: checkboxes
+    id: contribution-interest
+    attributes:
+      label: Contribution interest
+      description: >
+        If you would like to help build this feature, we would be happy to
+        support you. This is completely optional, but it helps us know when
+        someone is interested in contributing.
+      options:
+        - label: >
+            I would be interested in submitting a pull request to help implement this feature.

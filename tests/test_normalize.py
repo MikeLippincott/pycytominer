@@ -5,6 +5,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.preprocessing import QuantileTransformer
 
 from pycytominer.normalize import normalize
 
@@ -36,8 +37,8 @@ data_df = pd.DataFrame({
     "zz": [14, 46, 1, 6, 30, 100, 2, 2],
 }).reset_index(drop=True)
 
-data_file = os.path.join(tmpdir, "test_normalize.csv")
-data_df.to_csv(data_file, index=False, sep=",")
+data_file = os.path.join(tmpdir, "test_normalize.parquet")
+data_df.to_parquet(data_file, index=False)
 
 data_feature_infer_df = pd.DataFrame({
     "Metadata_plate": ["a", "a", "a", "a", "b", "b", "b", "b"],
@@ -57,8 +58,8 @@ data_feature_infer_df = pd.DataFrame({
     "Nuclei_zz": [14, 46, 1, 6, 30, 100, 2, 2],
 }).reset_index(drop=True)
 
-data_feature_infer_file = os.path.join(tmpdir, "test_normalize_infer.csv")
-data_feature_infer_df.to_csv(data_feature_infer_file, index=False, sep=",")
+data_feature_infer_file = os.path.join(tmpdir, "test_normalize_infer.parquet")
+data_feature_infer_df.to_parquet(data_feature_infer_file, index=False)
 
 a_feature = random.sample(range(1, 100), 10)
 b_feature = random.sample(range(1, 100), 10)
@@ -76,6 +77,14 @@ data_spherize_df = pd.DataFrame({
 
 data_no_var_df = pd.concat(
     [data_df, pd.DataFrame([1] * data_df.shape[0], columns=["yy"])], axis="columns"
+)
+
+ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+EXAMPLE_OME_PARQUET = os.path.join(
+    ROOT_DIR, "tests", "test_data", "cytodataframe", "example.ome.parquet"
+)
+EXAMPLE_ICEBERG_ROOT = os.path.join(
+    ROOT_DIR, "tests", "test_data", "cytotable", "examplehuman_iceberg_warehouse"
 )
 
 
@@ -115,6 +124,277 @@ def test_normalize_standardize_allsamples():
     pd.testing.assert_frame_equal(normalize_result, expected_result)
 
 
+def test_normalize_preserves_ome_arrow_columns_when_inferred():
+    profiles_path = os.path.join(
+        ROOT_DIR,
+        "tests",
+        "test_data",
+        "cytotable",
+        "examplehuman_iceberg_warehouse",
+        "warehouse",
+        "profiles",
+        "joined_profiles",
+        "data",
+        "00000-0-fe1e327c-3eb3-4711-833b-73ba36da733c.parquet",
+    )
+    image_crops_path = os.path.join(
+        ROOT_DIR,
+        "tests",
+        "test_data",
+        "cytotable",
+        "examplehuman_iceberg_warehouse",
+        "warehouse",
+        "images",
+        "image_crops",
+        "data",
+        "00000-0-2fa7c8c6-117b-4fab-ba87-c934a56fe88d.parquet",
+    )
+
+    profiles = (
+        pd.read_parquet(profiles_path, engine="pyarrow").head(8).reset_index(drop=True)
+    )
+    ome_arrow_columns = pd.read_parquet(image_crops_path, engine="pyarrow")[
+        ["ome_arrow_image", "ome_arrow_outline"]
+    ].head(8)
+    profiles = profiles.assign(
+        Metadata_treatment=["control"] * 4 + ["drug"] * 4,
+        ome_arrow_image=ome_arrow_columns["ome_arrow_image"].tolist(),
+        ome_arrow_outline=ome_arrow_columns["ome_arrow_outline"].tolist(),
+    )
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features="infer",
+        meta_features="infer",
+        samples="Metadata_treatment == 'control'",
+        method="standardize",
+    )
+
+    expected_metadata_columns = [
+        column for column in profiles.columns if column.startswith("Metadata_")
+    ]
+    expected_passthrough_image_columns = [
+        "Image_FileName_DNA",
+        "Image_FileName_OrigOverlay",
+        "Image_FileName_PH3",
+        "Image_FileName_cellbody",
+        "ome_arrow_image",
+        "ome_arrow_outline",
+    ]
+
+    assert "ome_arrow_image" in normalize_result.columns
+    assert "ome_arrow_outline" in normalize_result.columns
+    assert "Metadata_treatment" in normalize_result.columns
+    assert normalize_result.columns[: len(expected_metadata_columns)].tolist() == (
+        expected_metadata_columns
+    )
+    image_start = len(expected_metadata_columns)
+    image_end = image_start + len(expected_passthrough_image_columns)
+    assert normalize_result.columns[image_start:image_end].tolist() == (
+        expected_passthrough_image_columns
+    )
+    assert all(
+        column.startswith(("Cells_", "Cytoplasm_", "Nuclei_"))
+        for column in normalize_result.columns[image_end:]
+    )
+
+
+def test_normalize_example_ome_parquet_with_explicit_feature_columns():
+    profiles = pd.read_parquet(EXAMPLE_OME_PARQUET, engine="pyarrow")
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    normalize_result = normalize(
+        profiles=profiles,
+        # This column uses a ``Metadata_`` prefix in the source data but is
+        # intentionally normalized here as an explicit feature.
+        features=["Metadata_Cells_Number_Object_Number"],
+        meta_features=["Metadata_ImageNumber", "Metadata_treatment"],
+        samples="Metadata_treatment == 'control'",
+        method="standardize",
+    )
+
+    assert normalize_result.shape == (3, 15)
+    assert normalize_result.columns.tolist() == [
+        "Metadata_ImageNumber",
+        "Metadata_treatment",
+        "Image_FileName_GFP",
+        "Image_FileName_RFP",
+        "Image_FileName_DAPI",
+        "Image_FileName_GFP_OMEArrow_ORIG",
+        "Image_FileName_GFP_OMEArrow_LABL",
+        "Image_FileName_GFP_OMEArrow_COMP",
+        "Image_FileName_RFP_OMEArrow_ORIG",
+        "Image_FileName_RFP_OMEArrow_LABL",
+        "Image_FileName_RFP_OMEArrow_COMP",
+        "Image_FileName_DAPI_OMEArrow_ORIG",
+        "Image_FileName_DAPI_OMEArrow_LABL",
+        "Image_FileName_DAPI_OMEArrow_COMP",
+        "Metadata_Cells_Number_Object_Number",
+    ]
+
+
+def test_normalize_allows_none_missing_values_in_numeric_feature_columns():
+    profiles = data_df.copy()
+    profiles.loc[0, "x"] = None
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features=["x", "y", "z", "zz"],
+        meta_features="infer",
+        samples="all",
+        method="standardize",
+    )
+
+    assert "x" in normalize_result.columns
+    assert pd.isna(normalize_result.loc[0, "x"])
+
+
+def test_normalize_allows_string_missing_markers_in_feature_columns():
+    profiles = data_df.copy()
+    profiles["x"] = profiles["x"].astype(object)
+    profiles.loc[0, "x"] = "nan"
+    profiles.loc[1, "x"] = "None"
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features=["x", "y", "z", "zz"],
+        meta_features="infer",
+        samples="all",
+        method="standardize",
+    )
+
+    assert "x" in normalize_result.columns
+    assert pd.isna(normalize_result.loc[0, "x"])
+    assert pd.isna(normalize_result.loc[1, "x"])
+
+
+def test_normalize_rejects_malformed_string_feature_values():
+    profiles = data_df.copy()
+    profiles["x"] = profiles["x"].astype(object)
+    profiles.loc[0, "x"] = "not_a_number"
+
+    with pytest.raises(
+        ValueError,
+        match="normalize\\(\\) requires numeric feature columns",
+    ) as exc_info:
+        normalize(
+            profiles=profiles,
+            features=["x", "y", "z", "zz"],
+            meta_features="infer",
+            samples="all",
+            method="standardize",
+        )
+
+    assert "x" in str(exc_info.value)
+    assert "feature_select() first" in str(exc_info.value)
+
+
+def test_normalize_rejects_non_numeric_feature_columns():
+    profiles = pd.read_parquet(EXAMPLE_OME_PARQUET, engine="pyarrow")
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="normalize\\(\\) requires numeric feature columns",
+    ) as exc_info:
+        normalize(
+            profiles=profiles,
+            features=["Image_FileName_GFP_OMEArrow_ORIG"],
+            meta_features=["Metadata_ImageNumber", "Metadata_treatment"],
+            samples="Metadata_treatment == 'control'",
+            method="standardize",
+        )
+
+    assert "Image_FileName_GFP_OMEArrow_ORIG" in str(exc_info.value)
+    assert "feature_select() first" in str(exc_info.value)
+
+
+def test_normalize_rejects_mixed_numeric_and_ome_arrow_feature_columns():
+    profiles = pd.read_parquet(EXAMPLE_OME_PARQUET, engine="pyarrow")
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="normalize\\(\\) requires numeric feature columns",
+    ) as exc_info:
+        normalize(
+            profiles=profiles,
+            features=[
+                "Metadata_Cells_Number_Object_Number",
+                "Image_FileName_GFP_OMEArrow_ORIG",
+            ],
+            meta_features=["Metadata_ImageNumber", "Metadata_treatment"],
+            samples="Metadata_treatment == 'control'",
+            method="standardize",
+        )
+
+    assert "Image_FileName_GFP_OMEArrow_ORIG" in str(exc_info.value)
+    assert "feature_select() first" in str(exc_info.value)
+
+
+def test_normalize_warehouse_root_with_inferred_features():
+    profiles = pd.read_parquet(
+        os.path.join(
+            EXAMPLE_ICEBERG_ROOT,
+            "warehouse",
+            "profiles",
+            "joined_profiles",
+            "data",
+            "00000-0-fe1e327c-3eb3-4711-833b-73ba36da733c.parquet",
+        ),
+        engine="pyarrow",
+    )
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features="infer",
+        meta_features="infer",
+        samples="Metadata_treatment == 'control'",
+        method="standardize",
+    )
+
+    expected_metadata_columns = [
+        column for column in profiles.columns if column.startswith("Metadata_")
+    ]
+    expected_passthrough_image_columns = [
+        "Image_FileName_DNA",
+        "Image_FileName_OrigOverlay",
+        "Image_FileName_PH3",
+        "Image_FileName_cellbody",
+    ]
+
+    assert "Metadata_treatment" in normalize_result.columns
+    assert normalize_result.columns[: len(expected_metadata_columns)].tolist() == (
+        expected_metadata_columns
+    )
+    image_start = len(expected_metadata_columns)
+    image_end = image_start + len(expected_passthrough_image_columns)
+    assert normalize_result.columns[image_start:image_end].tolist() == (
+        expected_passthrough_image_columns
+    )
+    assert all(
+        column.startswith(("Cells_", "Cytoplasm_", "Nuclei_"))
+        for column in normalize_result.columns[image_end:]
+    )
+
+
 def test_normalize_standardize_ctrlsamples():
     """
     Testing normalize pycytominer function
@@ -147,6 +427,127 @@ def test_normalize_standardize_ctrlsamples():
         "z": [-1.3, 4.0, -0.6, 1.7, 2.5, 14.8, -0.6, -0.6],
         "zz": [5.9, 22.5, -0.9, 1.7, 14.2, 50.6, -0.4, -0.4],
     }).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(normalize_result, expected_result)
+
+
+def test_normalize_drop_cosmicqc_rows_before_normalization():
+    profiles = pd.DataFrame({
+        "Metadata_plate": ["plate_1"] * 4,
+        "Metadata_well": ["A01", "A02", "A03", "A04"],
+        "Metadata_cqc_clustered_nuclei_is_outlier": [False, True, False, False],
+        "Cells_x": [0, 1000, 1, 2],
+        "Nuclei_y": [10, 9999, 20, 30],
+    })
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features="infer",
+        meta_features="infer",
+        samples="all",
+        method="standardize",
+        drop_cosmicqc_rows=True,
+    )
+
+    expected_result = pd.DataFrame(
+        {
+            "Metadata_plate": ["plate_1"] * 3,
+            "Metadata_well": ["A01", "A03", "A04"],
+            "Metadata_cqc_clustered_nuclei_is_outlier": [False, False, False],
+            "Cells_x": [-1.224744871391589, 0.0, 1.224744871391589],
+            "Nuclei_y": [-1.224744871391589, 0.0, 1.224744871391589],
+        },
+        index=[0, 2, 3],
+    )
+
+    pd.testing.assert_frame_equal(normalize_result, expected_result)
+
+
+def test_normalize_drop_cosmicqc_rows_error_when_qc_columns_missing():
+    """
+    Testing the normalize pycytominer function
+    drop_cosmicqc_rows = True when there are
+    no QC columns in the dataframe.
+    """
+    profiles = pd.DataFrame({
+        "Metadata_plate": ["plate_1"] * 4,
+        "Metadata_well": ["A01", "A02", "A03", "A04"],
+        "Cells_x": [0, 1000, 1, 2],
+        "Nuclei_y": [10, 9999, 20, 30],
+    })
+
+    with pytest.raises(ValueError, match="QC columns"):
+        normalize(
+            profiles=profiles,
+            features="infer",
+            meta_features="infer",
+            samples="all",
+            method="standardize",
+            drop_cosmicqc_rows=True,
+        )
+
+
+def test_normalize_drop_cosmicqc_rows_drops_rows_with_true():
+    """
+    Testing the normalize pycytominer function
+    drop_cosmicqc_rows = True when all rows
+    are True and all rows will be dropped.
+    """
+    profiles = pd.DataFrame({
+        "Metadata_plate": ["plate_1"] * 4,
+        "Metadata_well": ["A01", "A02", "A03", "A04"],
+        "Metadata_cqc_clustered_nuclei_is_outlier": [True] * 4,
+        "Cells_x": [0, 1000, 1, 2],
+        "Nuclei_y": [10, 9999, 20, 30],
+    })
+
+    with pytest.raises(ValueError, match="All rows were dropped"):
+        normalize(
+            profiles=profiles,
+            features="infer",
+            meta_features="infer",
+            samples="all",
+            method="standardize",
+            drop_cosmicqc_rows=True,
+        )
+
+
+def test_normalize_drop_cosmicqc_rows_multiple_qc_columns():
+    """
+    Testing the normalize pycytominer function
+    drop_cosmicqc_rows = True when there are multiple
+    QC columns and rows with True in any of the QC columns
+    will be dropped.
+    """
+    profiles = pd.DataFrame({
+        "Metadata_plate": ["plate_1"] * 4,
+        "Metadata_well": ["A01", "A02", "A03", "A04"],
+        "Metadata_cqc_clustered_nuclei_is_outlier": [False, True, False, False],
+        "Metadata_cqc_abnormal_small_cell_is_outlier": [False, False, True, False],
+        "Cells_x": [0, 1000, 1, 2],
+        "Nuclei_y": [10, 9999, 20, 30],
+    })
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features="infer",
+        meta_features="infer",
+        samples="all",
+        method="standardize",
+        drop_cosmicqc_rows=True,
+    )
+
+    expected_result = pd.DataFrame(
+        {
+            "Metadata_plate": ["plate_1"] * 2,
+            "Metadata_well": ["A01", "A04"],
+            "Metadata_cqc_clustered_nuclei_is_outlier": [False, False],
+            "Metadata_cqc_abnormal_small_cell_is_outlier": [False, False],
+            "Cells_x": [-1.0, 1.0],
+            "Nuclei_y": [-1.0, 1.0],
+        },
+        index=[0, 3],
+    )
 
     pd.testing.assert_frame_equal(normalize_result, expected_result)
 
@@ -302,6 +703,83 @@ def test_normalize_robustize_mad_allsamples_novar():
     pd.testing.assert_frame_equal(normalize_result, expected_result)
 
 
+def test_normalize_inverse_normal_inferred_image_profile_features():
+    """
+    Testing normalize pycytominer function
+    method = "inverse_normal"
+    features = "infer"
+    samples = "all"
+    """
+    # Set features to the inferred image profile features
+    features = ["Cells_x", "Cells_y", "Cytoplasm_z", "Nuclei_zz"]
+
+    # Run normalize with the inferred features
+    normalize_result = normalize(
+        profiles=data_feature_infer_df.copy(),
+        features="infer",
+        meta_features=["Metadata_plate", "Metadata_treatment"],
+        samples="all",
+        method="inverse_normal",
+        inverse_normal_n_quantiles=5,
+    )
+
+    # Compute the expected result using QuantileTransformer with the same parameters
+    expected_features = QuantileTransformer(
+        n_quantiles=5,
+        output_distribution="normal",
+    ).fit_transform(data_feature_infer_df.loc[:, features])
+    expected_result = pd.concat(
+        [
+            data_feature_infer_df.loc[:, ["Metadata_plate", "Metadata_treatment"]],
+            pd.DataFrame(expected_features, columns=features),
+        ],
+        axis="columns",
+    )
+
+    pd.testing.assert_frame_equal(normalize_result, expected_result)
+
+
+def test_normalize_inverse_normal_control_samples():
+    """
+    Testing normalize pycytominer function
+    method = "inverse_normal"
+    samples = "Metadata_treatment == 'control'"
+    """
+
+    # Set features to the inferred image profile features
+    # and add a control query to select only control samples
+    features = ["Cells_x", "Cells_y", "Cytoplasm_z", "Nuclei_zz"]
+    control_query = "Metadata_treatment == 'control'"
+
+    # Run normalize with the inferred features and control samples
+    normalize_result = normalize(
+        profiles=data_feature_infer_df.copy(),
+        features=features,
+        meta_features=["Metadata_plate", "Metadata_treatment"],
+        samples=control_query,
+        method="inverse_normal",
+        inverse_normal_n_quantiles=3,
+    )
+
+    # Set up the expected result using QuantileTransformer with the same parameters
+    expected_scaler = QuantileTransformer(
+        n_quantiles=3,
+        output_distribution="normal",
+    ).fit(data_feature_infer_df.query(control_query).loc[:, features])
+    expected_features = expected_scaler.transform(
+        data_feature_infer_df.loc[:, features]
+    )
+    expected_result = pd.concat(
+        [
+            data_feature_infer_df.loc[:, ["Metadata_plate", "Metadata_treatment"]],
+            pd.DataFrame(expected_features, columns=features),
+        ],
+        axis="columns",
+    )
+
+    pd.testing.assert_frame_equal(normalize_result, expected_result)
+
+
 def test_normalize_standardize_allsamples_fromfile():
     """
     Testing normalize pycytominer function
@@ -452,9 +930,8 @@ def test_normalize_spherize():
                     spherize_center=spherize_center,
                 )
                 result_cov = (
-                    pd.DataFrame(
-                        np.cov(np.transpose(result.drop("id", axis="columns")))
-                    )
+                    pd
+                    .DataFrame(np.cov(np.transpose(result.drop("id", axis="columns"))))
                     .round()
                     .sum()
                     .clip(1)
@@ -473,7 +950,8 @@ def test_normalize_spherize():
                     spherize_center=spherize_center,
                 )
                 result_cov = (
-                    np.cov(
+                    np
+                    .cov(
                         np.transpose(
                             result.query("id == 'control'").drop("id", axis="columns")
                         )
@@ -488,7 +966,8 @@ def test_normalize_spherize():
                 assert result_cov < expected_result
 
                 non_spherize_result_cov = (
-                    np.cov(
+                    np
+                    .cov(
                         np.transpose(
                             result.query("id == 'treatment'").drop("id", axis="columns")
                         )
@@ -556,8 +1035,8 @@ def test_output_type():
     parquet_df = pd.read_parquet(output_test_file_parquet)
 
     # check to make sure the files were read in corrrectly as a pd.Dataframe
-    assert type(csv_df) == pd.DataFrame
-    assert type(parquet_df) == pd.DataFrame
+    assert isinstance(csv_df, pd.DataFrame)
+    assert isinstance(parquet_df, pd.DataFrame)
 
     # check to make sure both dataframes are the same regardless of the output_type
     pd.testing.assert_frame_equal(csv_df, parquet_df)

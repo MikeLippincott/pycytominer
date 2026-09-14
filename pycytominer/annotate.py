@@ -2,7 +2,8 @@
 Annotates profiles with metadata information
 """
 
-import os
+import warnings
+from typing import Literal, Optional, Union
 
 import pandas as pd
 
@@ -12,34 +13,38 @@ from pycytominer.cyto_utils import (
     infer_cp_features,
     load_platemap,
     load_profiles,
-    output,
+    prepare_external_metadata_for_annotate,
 )
+from pycytominer.cyto_utils.util import write_to_file_if_user_specifies_output_details
 
 
+@write_to_file_if_user_specifies_output_details
 def annotate(
-    profiles,
-    platemap,
-    join_on=["Metadata_well_position", "Metadata_Well"],
-    output_file=None,
-    output_type="csv",
-    add_metadata_id_to_platemap=True,
-    format_broad_cmap=False,
-    clean_cellprofiler=True,
-    external_metadata=None,
-    external_join_left=None,
-    external_join_right=None,
-    compression_options=None,
-    float_format=None,
-    cmap_args={},
+    profiles: Union[str, pd.DataFrame],
+    platemap: Union[str, pd.DataFrame],
+    join_on: Union[str, list[str]] = ["Metadata_well_position", "Metadata_Well"],
+    output_file: Optional[str] = None,
+    output_type: Optional[
+        Literal["csv", "parquet", "anndata_h5ad", "anndata_zarr"]
+    ] = "csv",
+    add_metadata_id_to_platemap: bool = True,
+    format_broad_cmap: bool = False,
+    clean_cellprofiler: bool = True,
+    external_metadata: Optional[Union[str, pd.DataFrame]] = None,
+    external_join_on: Optional[Union[str, list[str]]] = None,
+    compression_options: Optional[Union[str, dict[str, str]]] = None,
+    float_format: Optional[str] = None,
+    cmap_args: Optional[dict[str, Union[str]]] = None,
+    platemap_sep: Optional[str] = None,
     **kwargs,
-):
+) -> pd.DataFrame:
     """Add metadata to aggregated profiles.
 
     Parameters
     ----------
-    profiles : pandas.core.frame.DataFrame or file
+    profiles : pd.DataFrame or file
         DataFrame or file path of profiles.
-    platemap : pandas.core.frame.DataFrame or file
+    platemap : pd.DataFrame or file
         Dataframe or file path of platemap metadata.
     join_on : list or str, default: ["Metadata_well_position", "Metadata_Well"]
         Which variables to merge profiles and plate. The first element indicates variable(s) in platemap and the second element indicates variable(s) in profiles to merge using. Note the setting of `add_metadata_id_to_platemap`
@@ -52,14 +57,23 @@ def annotate(
         Whether the plate map variables possibly need "Metadata" pre-pended
     format_broad_cmap : bool, default False
         Whether we need to add columns to make compatible with Broad CMAP naming conventions.
+
+        .. warning::
+            The ``format_broad_cmap`` parameter is deprecated and will be
+            removed in a future Pycytominer release.
     clean_cellprofiler: bool, default True
-        Clean specific CellProfiler feature names.
-    external_metadata : str, optional
-        File with additional metadata information
-    external_join_left : str, optional
-        Merge column in the profile metadata.
-    external_join_right: str, optional
-        Merge column in the external metadata.
+        Clean specific CellProfiler feature names by dropping
+        Image_ prefix.
+        Default is true as the most common use case is
+        annotating CellProfiler profiles, but this can be
+        set to False if you are not using CellProfiler.
+    external_metadata : pd.DataFrame or file, optional
+        DataFrame or file with additional metadata information.
+        Most common use case is a QC.parquet file with QC flags for each profile
+        that comes from coSMicQC. File paths are loaded via :func:`load_profiles`.
+    external_join_on : str or list, optional
+        Merge column(s) shared by the annotated profiles and external metadata.
+        When provided, these keys are used on both sides of the external merge.
     compression_options : str or dict, optional
         Contains compression options as input to
         pd.DataFrame.to_csv(compression=compression_options). pandas version >= 1.2.
@@ -67,81 +81,98 @@ def annotate(
         Decimal precision to use in writing output file as input to
         pd.DataFrame.to_csv(float_format=float_format). For example, use "%.3g" for 3
         decimal precision.
-    cmap_args : dict, default {}
+    cmap_args : dict, default None
         Potential keyword arguments for annotate_cmap(). See cyto_utils/annotate_custom.py for more details.
+
+        .. warning::
+            The ``cmap_args`` parameter is deprecated and will be
+            removed in a future Pycytominer release.
+    platemap_sep : str, optional
+        Column delimiter for the platemap file (e.g. ``","`` for CSV, ``"\\t"``
+        for TSV). Only applies when ``platemap`` is a file path — ignored when
+        a DataFrame is passed directly.
+
+        When ``None`` (the default), the delimiter is detected automatically.
 
     Returns
     -------
-    annotated : pandas.core.frame.DataFrame, optional
+    pd.DataFrame
         DataFrame of annotated features. If output_file=None, then return the
-        DataFrame. If you specify output_file, then write to file and do not return
-        data.
+        DataFrame. If you specify output_file, profiles will be written on disk
+        based on provided output_file path.
+
+    Notes
+    -----
+    Parameters: `output_file`, `output_type`, `compression_options`, and `float_format`
+    are passed as kwargs to the `write_to_file_if_user_specifies_output_details` decorator,
+    which handles writing the output DataFrame to file if the user specifies output
+    details. If `output_file` is not specified, the function will return the annotated
+    DataFrame instead of writing to file.
     """
 
     # Load Data
     profiles = load_profiles(profiles)
-    platemap = load_platemap(platemap, add_metadata_id_to_platemap)
+    platemap = load_platemap(platemap, add_metadata_id_to_platemap, sep=platemap_sep)
 
     annotated = platemap.merge(
         profiles,
         left_on=join_on[0],
         right_on=join_on[1],
         how="inner",
-        suffixes=["_platemap", None],
+        suffixes=("_platemap", None),
     )
     if join_on[0] != join_on[1]:
         annotated = annotated.drop(join_on[0], axis="columns")
 
     # Add specific Connectivity Map (CMAP) formatting
     if format_broad_cmap:
-        annotated = annotate_cmap(annotated, annotate_join_on=join_on[1], **cmap_args)
+        # raise deprecation warning when format_broad_cmap is set to True
+        warnings.warn(
+            "The `format_broad_cmap` parameter in annotate() is deprecated and will be "
+            "removed in a future release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
 
-    if clean_cellprofiler:
-        annotated = cp_clean(annotated)
+        annotated = annotate_cmap(
+            annotated,
+            annotate_join_on=join_on[1],
+            cell_id="unknown" if not cmap_args else cmap_args.get("cell_id", "unknown"),
+            perturbation_mode="none"
+            if not cmap_args
+            else cmap_args.get("perturbation_mode", "none"),
+        )
 
-    if not isinstance(external_metadata, pd.DataFrame):
-        if external_metadata is not None:
-            if not os.path.exists(external_metadata):
-                raise FileNotFoundError(
-                    f"external metadata at {external_metadata} does not exist"
-                )
+    # Check that external metadata and join keys are being provided together
+    if (external_metadata is None) != (external_join_on is None):
+        raise ValueError(
+            "Both `external_metadata` and `external_join_on` must be provided together."
+        )
 
-            external_metadata = pd.read_csv(external_metadata)
-    else:
-        # Make a copy of the external metadata to avoid modifying the original column names
-        external_metadata = external_metadata.copy()
+    # Add external metadata if provided (including a QC.parquet file with QC flags)
+    if isinstance(external_metadata, str):
+        external_metadata = load_profiles(external_metadata)
 
     if isinstance(external_metadata, pd.DataFrame):
-        external_metadata.columns = [
-            f"Metadata_{x}" if not x.startswith("Metadata_") else x
-            for x in external_metadata.columns
-        ]
+        external_metadata = prepare_external_metadata_for_annotate(external_metadata)
 
         annotated = (
-            annotated.merge(
+            annotated
+            .merge(
                 external_metadata,
-                left_on=external_join_left,
-                right_on=external_join_right,
+                on=external_join_on,
                 how="left",
-                suffixes=[None, "_external"],
+                suffixes=(None, "_external"),
             )
             .reset_index(drop=True)
             .drop_duplicates()
         )
 
+    if clean_cellprofiler:
+        annotated = cp_clean(annotated)
+
     # Reorder annotated metadata columns
     meta_cols = infer_cp_features(annotated, metadata=True)
     other_cols = annotated.drop(meta_cols, axis="columns").columns.tolist()
-
     annotated = annotated.loc[:, meta_cols + other_cols]
-
-    if output_file is not None:
-        output(
-            df=annotated,
-            output_filename=output_file,
-            output_type=output_type,
-            compression_options=compression_options,
-            float_format=float_format,
-        )
-    else:
-        return annotated
+    return annotated

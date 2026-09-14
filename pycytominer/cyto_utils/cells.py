@@ -1,8 +1,16 @@
-from typing import Dict, Union, Optional
+"""
+Class to interact with single cell morphological profiles.
+"""
+
+import warnings
+from typing import Optional, Union, cast
 
 import numpy as np
 import pandas as pd
-from pycytominer import aggregate, annotate, normalize
+from sqlalchemy import create_engine, text
+
+from pycytominer import annotate, normalize
+from pycytominer.aggregate import aggregate
 from pycytominer.cyto_utils import (
     aggregate_fields_count,
     aggregate_image_features,
@@ -18,7 +26,6 @@ from pycytominer.cyto_utils import (
     output,
     provide_linking_cols_feature_name_update,
 )
-from sqlalchemy import create_engine
 
 default_compartments = get_default_compartments()
 default_linking_cols = get_default_linking_cols()
@@ -27,6 +34,11 @@ default_linking_cols = get_default_linking_cols()
 class SingleCells:
     """This is a class to interact with single cell morphological profiles. Interaction
     includes aggregation, normalization, and output.
+
+    .. warning::
+        The ``SingleCells`` class is deprecated and will be removed in a
+        future Pycytominer release. Please use
+        `CytoTable <https://github.com/cytomining/CytoTable>`_ instead.
 
     Attributes
     ----------
@@ -40,7 +52,7 @@ class SingleCells:
     output_file : str, default None
         If specified, the location to write the file.
     compartments : list of str, default ["cells", "cytoplasm", "nuclei"]
-        List of compartments to process.
+        list of compartments to process.
     compartment_linking_cols : dict, default noted below
         Dictionary identifying how to merge columns across tables.
     merge_cols : list of str, default ["TableNumber", "ImageNumber"]
@@ -50,9 +62,9 @@ class SingleCells:
     add_image_features: bool, default False
         Whether to add image features to the profiles.
     image_feature_categories : list of str, optional
-        List of categories of features from the image table to add to the profiles.
+        list of categories of features from the image table to add to the profiles.
     features: str or list of str, default "infer"
-        List of features that should be loaded or aggregated.
+        list of features that should be loaded or aggregated.
     load_image_data : bool, default True
         Whether or not the image data should be loaded into memory.
     image_table_name : str, default "image"
@@ -64,7 +76,7 @@ class SingleCells:
     subsampling_random_state : str or int, default None
         The random state to init subsample.
     fields_of_view : list of int, str, default "all"
-        List of fields of view to aggregate.
+        list of fields of view to aggregate.
     fields_of_view_feature : str, default "Metadata_Site"
         Name of the fields of view feature.
     object_feature : str, default "Metadata_ObjectNumber"
@@ -81,39 +93,43 @@ class SingleCells:
     Notes
     -----
     .. note::
-        the argument compartment_linking_cols is designed to work with CellProfiler output,
-        as curated by cytominer-database. The default is: {
-            "cytoplasm": {
-                "cells": "Cytoplasm_Parent_Cells",
-                "nuclei": "Cytoplasm_Parent_Nuclei",
-            },
-            "cells": {"cytoplasm": "ObjectNumber"},
-            "nuclei": {"cytoplasm": "ObjectNumber"},
-        }
+        The argument ``compartment_linking_cols`` is designed to work with CellProfiler
+        output, as curated by cytominer-database. The default is:
+
+        .. code-block:: python
+
+            {
+                "cytoplasm": {
+                    "cells": "Cytoplasm_Parent_Cells",
+                    "nuclei": "Cytoplasm_Parent_Nuclei",
+                },
+                "cells": {"cytoplasm": "ObjectNumber"},
+                "nuclei": {"cytoplasm": "ObjectNumber"},
+            }
     """
 
     def __init__(
         self,
-        sql_file,
-        strata=["Metadata_Plate", "Metadata_Well"],
-        aggregation_operation="median",
-        output_file=None,
-        compartments=default_compartments,
-        compartment_linking_cols=default_linking_cols,
-        merge_cols=["TableNumber", "ImageNumber"],
-        image_cols=["TableNumber", "ImageNumber", "Metadata_Site"],
-        add_image_features=False,
-        image_feature_categories=None,
-        features="infer",
-        load_image_data=True,
-        image_table_name="image",
-        subsample_frac=1,
-        subsample_n="all",
-        subsampling_random_state=None,
-        fields_of_view="all",
-        fields_of_view_feature="Metadata_Site",
-        object_feature="Metadata_ObjectNumber",
-        default_datatype_float=np.float64,
+        sql_file: str,
+        strata: list[str] = ["Metadata_Plate", "Metadata_Well"],
+        aggregation_operation: str = "median",
+        output_file: Optional[str] = None,
+        compartments: list[str] = default_compartments,
+        compartment_linking_cols: dict[str, dict[str, str]] = default_linking_cols,
+        merge_cols: list[str] = ["TableNumber", "ImageNumber"],
+        image_cols: list[str] = ["TableNumber", "ImageNumber", "Metadata_Site"],
+        add_image_features: bool = False,
+        image_feature_categories: Optional[list[str]] = None,
+        features: Union[str, list[str]] = "infer",
+        load_image_data: bool = True,
+        image_table_name: str = "image",
+        subsample_frac: float = 1.0,
+        subsample_n: Union[str, int] = "all",
+        subsampling_random_state: Optional[Union[str, int]] = None,
+        fields_of_view: Union[str, list[Union[int]]] = "all",
+        fields_of_view_feature: str = "Metadata_Site",
+        object_feature: str = "Metadata_ObjectNumber",
+        default_datatype_float: type[np.generic] = np.float64,
     ):
         """Constructor method"""
         # Check compartments specified
@@ -123,9 +139,17 @@ class SingleCells:
         aggregation_operation = check_aggregate_operation(aggregation_operation)
 
         # Check that the subsample_frac is between 0 and 1
-        assert (  # noqa: S101
-            subsample_frac > 0 and subsample_frac <= 1
-        ), "subsample_frac must be between 0 and 1"
+        if not subsample_frac > 0 and subsample_frac <= 1:
+            raise ValueError("subsample_frac must be between 0 and 1")
+
+        # set SingleCells deprecation warning and recommend CytoTable
+        warnings.warn(
+            "The SingleCells class is deprecated and will be removed in a future "
+            "Pycytominer release. Please use CytoTable instead: "
+            "https://github.com/cytomining/CytoTable",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
 
         self.sql_file = sql_file
         self.strata = strata
@@ -140,7 +164,7 @@ class SingleCells:
         self.features = features
         self.subsample_frac = subsample_frac
         self.subsample_n = subsample_n
-        self.subset_data_df = None
+        self.subset_data_df: Optional[pd.DataFrame] = None
         self.subsampling_random_state = subsampling_random_state
         self.is_aggregated = False
         self.is_subset_computed = False
@@ -188,11 +212,10 @@ class SingleCells:
         """
 
         # Check that the user didn't specify both subset frac and subsample all
-        assert (  # noqa: S101
-            self.subsample_frac == 1 or self.subsample_n == "all"
-        ), "Do not set both subsample_frac and subsample_n"
+        if not (self.subsample_frac == 1 or self.subsample_n == "all"):
+            raise ValueError("Do not set both subsample_frac and subsample_n")
 
-    def set_output_file(self, output_file):
+    def set_output_file(self, output_file: str):
         """Setting operation to conveniently rename output file.
 
         Parameters
@@ -208,7 +231,7 @@ class SingleCells:
 
         self.output_file = output_file
 
-    def set_subsample_frac(self, subsample_frac):
+    def set_subsample_frac(self, subsample_frac: float):
         """Setting operation to conveniently update the subsample fraction.
 
         Parameters
@@ -225,7 +248,7 @@ class SingleCells:
         self.subsample_frac = subsample_frac
         self._check_subsampling()
 
-    def set_subsample_n(self, subsample_n):
+    def set_subsample_n(self, subsample_n: Union[str, int]):
         """Setting operation to conveniently update the subsample n.
 
         Parameters
@@ -245,7 +268,7 @@ class SingleCells:
             raise ValueError("subsample n must be an integer or coercable")
         self._check_subsampling()
 
-    def set_subsample_random_state(self, random_state):
+    def set_subsample_random_state(self, random_state: int):
         """Setting operation to conveniently update the subsample random state.
 
         Parameters
@@ -261,7 +284,7 @@ class SingleCells:
 
         self.subsampling_random_state = random_state
 
-    def load_image(self, image_table_name=None):
+    def load_image(self, image_table_name: Optional[str] = None):
         """Load image table from sqlite file
 
         Returns
@@ -276,6 +299,11 @@ class SingleCells:
         self.image_df = pd.read_sql(sql=image_query, con=self.conn)
 
         if self.add_image_features:
+            if self.image_feature_categories is None:
+                raise ValueError(
+                    "If add_image_features is True, image_feature_categories must be specified"
+                )
+
             self.image_features_df = extract_image_features(
                 self.image_feature_categories,
                 self.image_df,
@@ -287,6 +315,9 @@ class SingleCells:
         self.image_df = self.image_df[image_features]
 
         if self.fields_of_view != "all":
+            if not isinstance(self.fields_of_view, list):
+                raise ValueError("fields_of_view must be a list of integers or 'all'")
+
             check_fields_of_view(
                 list(np.unique(self.image_df[self.fields_of_view_feature])),
                 list(self.fields_of_view),
@@ -302,61 +333,142 @@ class SingleCells:
 
         self.image_data_loaded = True
 
-    def count_cells(self, compartment="cells", count_subset=False):
+    def count_cells(
+        self,
+        compartment: str = "cells",
+        merge_cols: list[str] = ["TableNumber", "ImageNumber"],
+        object_col: str = "ObjectNumber",
+        image_count_col: str = "Count_Cells",
+        count_subset: bool = False,
+    ) -> pd.DataFrame:
         """Determine how many cells are measured per well.
 
         Parameters
         ----------
         compartment : str, default "cells"
             Compartment to subset.
+        merge_cols : list[str], default ["TableNumber", "ImageNumber"]
+            Columns used to merge image and compartment tables when falling back
+            to object-level counting. Must include at least one column when
+            image_count_col is unavailable.
+        object_col : str, default "ObjectNumber"
+            Column used as the object identifier when falling back to
+            object-level counting. Must be non-empty when image_count_col is
+            unavailable.
+        image_count_col : str, default "Count_Cells"
+            Image-level count column to sum by strata before falling back to
+            object-level counting.
         count_subset : bool, default False
             Whether or not count the number of cells as specified by the strata groups.
 
         Returns
         -------
-        pandas.core.frame.DataFrame
+        pd.DataFrame
             DataFrame of cell counts in the experiment.
         """
 
-        check_compartments(compartment)
+        check_compartments([compartment])
 
+        # count the number of cells per group by merging image and compartment data
+        # if count_subset is True, otherwise use image-level count or object counting
+        # without merging
         if count_subset:
-            assert self.is_aggregated, "Make sure to aggregate_profiles() first!"  # noqa: S101
-            assert self.is_subset_computed, "Make sure to get_subsample() first!"  # noqa: S101
+            if not self.is_aggregated:
+                raise RuntimeError("Make sure to aggregate_profiles() first!")
+
+            if not self.is_subset_computed:
+                raise RuntimeError("Make sure to get_subsample() first!")
+
+            # Guard so mypy knows they're non-None at runtime
+            if self.subset_data_df is None:
+                raise RuntimeError("count_cells() did not set subset_data_df")
+
             count_df = (
-                self.subset_data_df.groupby(self.strata)["Metadata_ObjectNumber"]
+                self.subset_data_df
+                .groupby(self.strata)[self.object_feature]
                 .count()
                 .reset_index()
-                .rename({"Metadata_ObjectNumber": "cell_count"}, axis="columns")
+                .rename({self.object_feature: "cell_count"}, axis="columns")
             )
         else:
-            query_cols = "TableNumber, ImageNumber, ObjectNumber"
+            # prefer image-level count feature when available, then fallback to object
+            # counting.
+            if image_count_col in self.image_df.columns:
+                count_df = (
+                    self.image_df
+                    .groupby(self.strata)[image_count_col]
+                    .sum()
+                    .reset_index()
+                    .rename({image_count_col: "cell_count"}, axis="columns")
+                )
+                return count_df
+
+            # if the image-level count column is present in the image table, use it to
+            # compute cell counts per strata.
+            image_table_col_names = self.get_sql_table_col_names(self.image_table_name)
+            if image_count_col in image_table_col_names:
+                image_count_query_cols = ", ".join([*self.merge_cols, image_count_col])
+                image_count_query = (
+                    f"select {image_count_query_cols} from {self.image_table_name}"
+                )
+                image_count_df = pd.read_sql(sql=image_count_query, con=self.conn)
+                count_df = self.image_df.merge(
+                    image_count_df, how="inner", on=self.merge_cols
+                )
+                count_df = (
+                    count_df
+                    .groupby(self.strata)[image_count_col]
+                    .sum()
+                    .reset_index()
+                    .rename({image_count_col: "cell_count"}, axis="columns")
+                )
+                return count_df
+
+            # Fall back to object-level counting when an image-level count column
+            # is unavailable in both the loaded image data and the SQL image table.
+            # This path requires merge columns to attach image metadata to object
+            # rows before grouping by strata.
+            if len(merge_cols) < 1:
+                raise ValueError("merge_cols must include at least one merge column.")
+
+            # This path also requires an object identifier column to count objects
+            # per strata.
+            if not object_col:
+                raise ValueError("object_col must be a non-empty column name.")
+
+            # specify query to get the columns needed for counting cells per group
+            query_cols = ", ".join([*merge_cols, object_col])
             query = f"select {query_cols} from {compartment}"
+
+            # count the number of cells per group by merging image and compartment data
             count_df = self.image_df.merge(
-                pd.read_sql(sql=query, con=self.conn), how="inner", on=self.merge_cols
+                pd.read_sql(sql=query, con=self.conn), how="inner", on=merge_cols
             )
             count_df = (
-                count_df.groupby(self.strata)["ObjectNumber"]
+                count_df
+                .groupby(self.strata)[object_col]
                 .count()
                 .reset_index()
-                .rename({"ObjectNumber": "cell_count"}, axis="columns")
+                .rename({object_col: "cell_count"}, axis="columns")
             )
 
         return count_df
 
-    def subsample_profiles(self, df, rename_col=True):
+    def subsample_profiles(
+        self, df: pd.DataFrame, rename_col: bool = True
+    ) -> pd.DataFrame:
         """Sample a Pandas DataFrame given subsampling information.
 
         Parameters
         ----------
-        df : pandas.core.frame.DataFrame
+        df : pd.DataFrame
             DataFrame of a single cell profile.
         rename_col : bool, default True
             Whether or not to rename the columns.
 
         Returns
         -------
-        pandas.core.frame.DataFrame
+        pd.DataFrame
             A subsampled pandas dataframe of single cell profiles.
         """
 
@@ -367,13 +479,19 @@ class SingleCells:
         if self.subsample_frac == 1:
             output_df = pd.DataFrame.sample(
                 df,
-                n=self.subsample_n,
+                n=int(self.subsample_n) if self.subsample_n is not None else None,
                 replace=True,
-                random_state=self.subsampling_random_state,
+                random_state=int(self.subsampling_random_state)
+                if self.subsampling_random_state is not None
+                else None,
             )
         else:
             output_df = pd.DataFrame.sample(
-                df, frac=self.subsample_frac, random_state=self.subsampling_random_state
+                df,
+                frac=self.subsample_frac,
+                random_state=int(self.subsampling_random_state)
+                if self.subsampling_random_state is not None
+                else None,
             )
 
         if rename_col:
@@ -381,12 +499,17 @@ class SingleCells:
 
         return output_df
 
-    def get_subsample(self, df=None, compartment="cells", rename_col=True):
+    def get_subsample(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        compartment: str = "cells",
+        rename_col: bool = True,
+    ):
         """Apply the subsampling procedure.
 
         Parameters
         ----------
-        df : pandas.core.frame.DataFrame
+        df : pd.DataFrame
             DataFrame of a single cell profile.
         compartment : str, default "cells"
             The compartment to process.
@@ -401,7 +524,7 @@ class SingleCells:
 
         check_compartments(compartment)
 
-        query_cols = "TableNumber, ImageNumber, ObjectNumber"
+        query_cols = ", ".join([*self.merge_cols, "ObjectNumber"])
         query = f"select {query_cols} from {compartment}"
 
         # Load query and merge with image_df
@@ -411,26 +534,31 @@ class SingleCells:
         query_df = self.image_df.merge(df, how="inner", on=self.merge_cols)
 
         self.subset_data_df = (
-            query_df.groupby(self.strata)
-            .apply(lambda x: self.subsample_profiles(x, rename_col=rename_col))
+            query_df
+            .groupby(self.strata)
+            .apply(
+                lambda x: self.subsample_profiles(
+                    pd.DataFrame(x), rename_col=rename_col
+                )
+            )
             .reset_index(drop=True)
         )
 
         self.is_subset_computed = True
 
-    def count_sql_table_rows(self, table):
+    def count_sql_table_rows(self, table: str):
         """Count total number of rows for a table."""
-        (num_rows,) = next(self.conn.execute(f"SELECT COUNT(*) FROM {table}"))
+        (num_rows,) = next(self.conn.execute(text(f"SELECT COUNT(*) FROM {table}")))
         return num_rows
 
-    def get_sql_table_col_names(self, table):
+    def get_sql_table_col_names(self, table: str):
         """Get column names from the database."""
-        ptr = self.conn.execute(f"SELECT * FROM {table} LIMIT 1").cursor
+        ptr = self.conn.execute(text(f"SELECT * FROM {table} LIMIT 1")).cursor
         col_names = [obj[0] for obj in ptr.description]
 
         return col_names
 
-    def split_column_categories(self, col_names):
+    def split_column_categories(self, col_names: list[str]):
         """Split a list of column names into feature and metadata columns lists."""
         feat_cols = []
         meta_cols = []
@@ -442,7 +570,7 @@ class SingleCells:
 
         return meta_cols, feat_cols
 
-    def load_compartment(self, compartment):
+    def load_compartment(self, compartment: str) -> pd.DataFrame:
         """Creates the compartment dataframe.
 
         Note: makes use of default_datatype_float attribute
@@ -455,7 +583,7 @@ class SingleCells:
 
         Returns
         -------
-        pandas.core.frame.DataFrame
+        pd.DataFrame
             Compartment dataframe.
         """
 
@@ -476,12 +604,11 @@ class SingleCells:
 
         # Query database for selected columns of chosen compartment
         columns = ", ".join(meta_cols + feat_cols)
-        query = f"select {columns} from {compartment}"
-        query_result = self.conn.execute(query)
+        query_result = self.conn.execute(text(f"select {columns} from {compartment}"))
 
         # Load data row by row for both meta information and features
         for i, row in enumerate(query_result):
-            metas.loc[i] = row[:num_meta]
+            metas.iloc[i] = cast(pd.Series, row[:num_meta])
             feats[i] = row[num_meta:]
 
         # Return concatenated data and metainformation of compartment
@@ -489,12 +616,12 @@ class SingleCells:
 
     def aggregate_compartment(
         self,
-        compartment,
-        compute_subsample=False,
-        compute_counts=False,
-        add_image_features=False,
-        n_aggregation_memory_strata=1,
-    ):
+        compartment: str,
+        compute_subsample: bool = False,
+        compute_counts: bool = False,
+        add_image_features: bool = False,
+        n_aggregation_memory_strata: int = 1,
+    ) -> pd.DataFrame:
         """Aggregate morphological profiles. Uses pycytominer.aggregate()
 
         Parameters
@@ -517,7 +644,7 @@ class SingleCells:
 
         Returns
         -------
-        pandas.core.frame.DataFrame
+        pd.DataFrame
             DataFrame of aggregated profiles.
         """
 
@@ -531,7 +658,7 @@ class SingleCells:
             self.load_image(image_table_name=self.image_table_name)
 
         # Iteratively call aggregate() on chunks of the full compartment table
-        object_dfs = []
+        object_dfs: list[Union[pd.DataFrame, str, None]] = []
         for compartment_df in self._compartment_df_generator(
             compartment=compartment,
             n_aggregation_memory_strata=n_aggregation_memory_strata,
@@ -543,7 +670,7 @@ class SingleCells:
             ).rename(self.linking_col_rename, axis="columns")
 
             if self.features == "infer":
-                aggregate_features = infer_cp_features(
+                aggregate_features: Union[str, list[str]] = infer_cp_features(
                     population_df, compartments=compartment
                 )
             else:
@@ -565,6 +692,12 @@ class SingleCells:
                 )
 
                 if add_image_features:
+                    # ensure image features are loaded
+                    if self.image_feature_categories is None:
+                        raise ValueError(
+                            "image_feature_categories must be specified if add_image_features is True"
+                        )
+
                     fields_count_df = aggregate_image_features(
                         fields_count_df,
                         self.image_features_df,
@@ -573,6 +706,14 @@ class SingleCells:
                         self.strata,
                         self.aggregation_operation,
                     )
+
+                # check that aggregate_image_features returned a dataframe
+                if not isinstance(fields_count_df, pd.DataFrame):
+                    raise RuntimeError(
+                        "aggregate_image_features() did not return a DataFrame"
+                    )
+                if not isinstance(partial_object_df, pd.DataFrame):
+                    raise RuntimeError("aggregate() did not return a DataFrame")
 
                 partial_object_df = fields_count_df.merge(
                     partial_object_df,
@@ -590,15 +731,21 @@ class SingleCells:
 
             object_dfs.append(partial_object_df)
 
+        # check that all entries in object_dfs are DataFrames (aggregate may return str's or None)
+        if not all(isinstance(df, pd.DataFrame) for df in object_dfs):
+            raise RuntimeError("object_dfs contains non-DataFrame entries")
+
         # Concatenate one or more aggregated dataframes row-wise into final output
-        object_df = pd.concat(object_dfs, axis=0).reset_index(drop=True)
+        object_df = pd.concat(cast(list[pd.DataFrame], object_dfs), axis=0).reset_index(
+            drop=True
+        )
 
         return object_df
 
     def _compartment_df_generator(
         self,
-        compartment,
-        n_aggregation_memory_strata=1,
+        compartment: str,
+        n_aggregation_memory_strata: int = 1,
     ):
         """A generator function that returns chunks of the entire compartment
         table from disk.
@@ -616,16 +763,17 @@ class SingleCells:
 
         Returns
         -------
-        image_df : Iterator[pandas.core.frame.DataFrame]
+        image_df : Iterator[pd.DataFrame]
             A generator whose __next__() call returns a chunk of the compartment
             table, where rows comprising a unique aggregation stratum are not split
             between chunks, and thus groupby aggregations are valid
 
         """
 
-        assert (  # noqa: S101
-            n_aggregation_memory_strata > 0
-        ), "Number of strata to pull into memory at once (n_aggregation_memory_strata) must be > 0"
+        if not (n_aggregation_memory_strata > 0):
+            raise ValueError(
+                "Number of strata to pull into memory at once (n_aggregation_memory_strata) must be > 0"
+            )
 
         # Obtain data types of all columns of the compartment table
         cols = "*"
@@ -635,7 +783,7 @@ class SingleCells:
         )
         all_columns = compartment_row1.columns
         if self.features != "infer":  # allow to get only some features
-            all_columns = [x for x in all_columns if x in self.features]
+            all_columns = all_columns[all_columns.isin(pd.Index(self.features))]
 
         typeof_str = ", ".join([f"typeof({x})" for x in all_columns])
         compartment_dtypes = pd.read_sql(
@@ -654,9 +802,10 @@ class SingleCells:
 
         # Obtain all valid strata combinations, and their merge_cols values
         df_unique_mergecols = (
-            self.image_df[self.strata + self.merge_cols]
+            self
+            .image_df[self.strata + self.merge_cols]
             .groupby(self.strata)
-            .agg(lambda s: np.unique(s).tolist())
+            .agg(lambda s: np.unique(s).tolist())  # type: ignore[misc]
             .reset_index(drop=True)
         )
 
@@ -683,10 +832,10 @@ class SingleCells:
         compression_options: Optional[str] = None,
         float_format: Optional[str] = None,
         single_cell_normalize: bool = False,
-        normalize_args: Optional[Dict] = None,
+        normalize_args: Optional[dict] = None,
         platemap: Optional[Union[str, pd.DataFrame]] = None,
         **kwargs,
-    ):
+    ) -> Union[pd.DataFrame, str]:
         """Given the linking columns, merge single cell data. Normalization is also supported.
 
         Parameters
@@ -708,13 +857,13 @@ class SingleCells:
 
         Returns
         -------
-        pandas.core.frame.DataFrame or str
+        pd.DataFrame or str
             if output_file=None returns a Pandas dataframe
             else will write to file and return the filepath of the file
         """
 
         # Load the single cell dataframe by merging on the specific linking columns
-        sc_df = ""
+        left_compartment_loaded = False
         linking_check_cols = []
         merge_suffix_rename = []
         for left_compartment in self.compartment_linking_cols:
@@ -725,11 +874,11 @@ class SingleCells:
                     continue
 
                 # Specify how to indicate merge suffixes
-                merge_suffix = [
+                merge_suffix: tuple[Optional[str], Optional[str]] = (
                     f"_{left_compartment}",
                     f"_{right_compartment}",
-                ]
-                merge_suffix_rename += merge_suffix
+                )
+                merge_suffix_rename += list(merge_suffix)
                 left_link_col = self.compartment_linking_cols[left_compartment][
                     right_compartment
                 ]
@@ -737,12 +886,20 @@ class SingleCells:
                     left_compartment
                 ]
 
-                if isinstance(sc_df, str):
+                if not left_compartment_loaded:
                     sc_df = self.load_compartment(compartment=left_compartment)
 
                     if compute_subsample:
                         # Sample cells proportionally by self.strata
                         self.get_subsample(df=sc_df, rename_col=False)
+
+                        # Guard for None defaults supplied at instantiation
+                        if self.subset_data_df is None:
+                            raise RuntimeError(
+                                "get_subsample() did not set subset_data_df"
+                            )
+                        if self.image_df is None:
+                            raise RuntimeError("get_subsample() did not set image_df")
 
                         subset_logic_df = self.subset_data_df.drop(
                             self.image_df.columns, axis="columns"
@@ -751,6 +908,8 @@ class SingleCells:
                         sc_df = subset_logic_df.merge(
                             sc_df, how="left", on=subset_logic_df.columns.tolist()
                         ).reindex(sc_df.columns, axis="columns")
+
+                    left_compartment_loaded = True
 
                 sc_df = sc_df.merge(
                     self.load_compartment(compartment=right_compartment),
@@ -782,7 +941,8 @@ class SingleCells:
             self.load_image(image_table_name=self.image_table_name)
 
         sc_df = (
-            self.image_df.merge(sc_df, on=self.merge_cols, how="right")
+            self.image_df
+            .merge(sc_df, on=self.merge_cols, how="right")
             # pandas rename performance may be improved using copy=False, inplace=False
             # reference: https://ryanlstevens.github.io/2022-05-06-pandasColumnRenaming/
             .rename(self.linking_col_rename, axis="columns", copy=False, inplace=False)
@@ -804,11 +964,13 @@ class SingleCells:
 
             normalize_args["features"] = features
 
-            sc_df = normalize(profiles=sc_df, **normalize_args)
+            # ignore mypy warnings below as these reference root package imports
+            sc_df = normalize(profiles=sc_df, **normalize_args)  # type: ignore[operator]
 
         # In case platemap metadata is provided, use pycytominer.annotate for metadata
         if platemap is not None:
-            sc_df = annotate(
+            # ignore mypy warnings below as these reference root package imports
+            sc_df = annotate(  # type: ignore[operator]
                 profiles=sc_df, platemap=platemap, output_file=None, **kwargs
             )
 
@@ -826,11 +988,11 @@ class SingleCells:
 
     def aggregate_profiles(
         self,
-        compute_subsample=False,
-        output_file=None,
-        compression_options=None,
-        float_format=None,
-        n_aggregation_memory_strata=1,
+        compute_subsample: bool = False,
+        output_file: Optional[str] = None,
+        compression_options: Optional[str] = None,
+        float_format: Optional[str] = None,
+        n_aggregation_memory_strata: int = 1,
         **kwargs,
     ):
         """Aggregate and merge compartments. This is the primary entry to this class.
@@ -852,7 +1014,7 @@ class SingleCells:
 
         Returns
         -------
-        pandas.core.frame.DataFrame or str
+        pd.DataFrame or str
             if output_file=None) returns a Pandas dataframe
             else will write to file and return the filepath of the file
         """
@@ -893,17 +1055,17 @@ class SingleCells:
             return aggregated
 
 
-def _sqlite_strata_conditions(df, dtypes, n=1):
+def _sqlite_strata_conditions(df: pd.DataFrame, dtypes: dict[str, str], n: int = 1):
     """Given a dataframe where columns are merge_cols and rows are unique
     value combinations that appear as aggregation strata, return a list
     of strings which constitute valid SQLite conditional statements.
 
     Parameters
     ----------
-    df : pandas.core.frame.DataFrame
+    df : pd.DataFrame
         A dataframe where columns are merge_cols and rows represent
         unique aggregation strata of the compartment table
-    dtypes : Dict[str, str]
+    dtypes : dict[str, str]
         Dictionary to look up SQLite datatype based on column name
     n : int
         Number of rows of the input df to combine in each output
@@ -914,7 +1076,7 @@ def _sqlite_strata_conditions(df, dtypes, n=1):
 
     Returns
     -------
-    grouped_conditions : List[str]
+    grouped_conditions : list[str]
         A list of strings, each string being a valid SQLite conditional
 
     Examples

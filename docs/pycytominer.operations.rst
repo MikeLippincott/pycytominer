@@ -2,12 +2,20 @@ Operations
 ==========
 
 We do not recommend interacting with these functions directly.
-The core pycytominer API uses these operations internally.
+The core Pycytominer API uses these operations internally.
 
 pycytominer.operations.correlation\_threshold module
 ----------------------------------------------------
 
 .. automodule:: pycytominer.operations.correlation_threshold
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+pycytominer.operations.frequency\_threshold module
+--------------------------------------------------
+
+.. automodule:: pycytominer.operations.frequency_threshold
    :members:
    :undoc-members:
    :show-inheritance:

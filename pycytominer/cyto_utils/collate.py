@@ -1,40 +1,57 @@
+"""
+Collate CellProfiler CSVs into SQLite files using cytominer-database
+"""
+
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
-import sqlite3
+import tempfile
+import warnings
+from typing import Optional
 
 
-def run_check_errors(cmd):
+def run_check_errors(cmd: list[str]) -> None:
     """Run a system command, and exit if an error occurred, otherwise continue"""
-    if isinstance(cmd, str):
-        cmd = cmd.split()
-    output = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
-    if output.stderr != "":
-        print_cmd = " ".join(map(str, cmd))
+    output = subprocess.run(args=cmd, capture_output=True, text=True, check=False)  # noqa: S603
+    if output.returncode != 0:
+        print_cmd = " ".join(cmd)
+        error_text = output.stderr.strip() or output.stdout.strip() or "unknown error"
         sys.exit(
-            f"The error {output.stderr} was generated when running {print_cmd}. Exiting."
+            f"The error {error_text} was generated when running {print_cmd}. Exiting."
         )
-    return
 
 
 def collate(
-    batch,
-    config,
-    plate,
-    base_directory="../..",
-    column=None,
-    munge=False,
-    csv_dir="analysis",
-    aws_remote=None,
-    aggregate_only=False,
-    tmp_dir="/tmp",  # noqa: S108
-    overwrite=False,
-    add_image_features=True,
-    image_feature_categories=["Granularity", "Texture", "ImageQuality", "Threshold"],
-    printtoscreen=True,
+    batch: str,
+    config: str,
+    plate: str,
+    base_directory: str = "../..",
+    column: Optional[str] = None,
+    munge: bool = False,
+    csv_dir: str = "analysis",
+    aws_remote: Optional[str] = None,
+    aggregate_only: bool = False,
+    tmp_dir: Optional[str] = None,
+    overwrite: bool = False,
+    add_image_features: bool = True,
+    image_feature_categories: Optional[list[str]] = [
+        "Granularity",
+        "Texture",
+        "ImageQuality",
+        "Threshold",
+    ],
+    printtoscreen: bool = True,
 ):
     """Collate the CellProfiler-created CSVs into a single SQLite file by calling cytominer-database
+
+    .. warning::
+        With the deprecation of cytominer-database, ``collate`` is deprecated
+        and will be removed in a future Pycytominer release. Please consider
+        using CellProfiler's ``ExportToDatabase`` module to create single-cell
+        SQLite files, or `CytoTable <https://github.com/cytomining/CytoTable>`_
+        to create single-cell Parquet files.
 
     Parameters
     ----------
@@ -56,8 +73,9 @@ def collate(
         A remote AWS prefix, if set CSV files will be synced down from at the beginning and to which SQLite files will be synced up at the end of the run
     aggregate_only : bool, default False
         Whether to perform only the aggregation of existent SQLite files and bypass previous collation steps
-    tmp_dir: str, default '/tmp'
-        The temporary directory to be used by cytominer-databases for output
+    tmp_dir: str, optional
+        The temporary directory to be used by cytominer-databases for output. If
+        not provided, the system temporary directory is used.
     overwrite: bool, optional, default False
         Whether or not to overwrite an sqlite that exists in the temporary directory if it already exists
     add_image_features: bool, optional, default True
@@ -81,7 +99,20 @@ def collate(
             """
         )
 
+    # show a warning about collate deprecation
+    warnings.warn(
+        (
+            "With the deprecation of cytominer-database, "
+            "pycytominer.cyto_utils.collate will be removed in future versions of Pycytominer. "
+            "Please consider using CellProfiler's ExportToDatabase module to create single-cell "
+            "SQLite files or CytoTable to create single-cell Parquet files."
+        ),
+        category=DeprecationWarning,
+        stacklevel=2,  # points at the caller of your function
+    )
+
     # Set up directories (these need to be abspaths to keep from confusing makedirs later)
+    tmp_dir = tempfile.gettempdir() if tmp_dir is None else tmp_dir
     input_dir = pathlib.Path(f"{base_directory}/analysis/{batch}/{plate}/{csv_dir}")
     backend_dir = pathlib.Path(f"{base_directory}/backend/{batch}/{plate}")
     cache_backend_dir = pathlib.Path(f"{tmp_dir}/backend/{batch}/{plate}")
@@ -110,7 +141,24 @@ def collate(
 
             remote_aggregated_file = f"{aws_remote}/backend/{batch}/{plate}/{plate}.csv"
 
-            sync_cmd = f"aws s3 sync --exclude * --include */Cells.csv --include */Nuclei.csv --include */Cytoplasm.csv --include */Image.csv {remote_input_dir} {input_dir}"
+            # Keep the AWS command as argv to avoid shell parsing in subprocess.run.
+            sync_cmd = [
+                "aws",
+                "s3",
+                "sync",
+                "--exclude",
+                "*",
+                "--include",
+                "*/Cells.csv",
+                "--include",
+                "*/Nuclei.csv",
+                "--include",
+                "*/Cytoplasm.csv",
+                "--include",
+                "*/Image.csv",
+                remote_input_dir,
+                str(input_dir),
+            ]
             if printtoscreen:
                 print(f"Downloading CSVs from {remote_input_dir} to {input_dir}")
             run_check_errors(sync_cmd)
@@ -131,7 +179,7 @@ def collate(
         with sqlite3.connect(cache_backend_file, isolation_level=None) as connection:
             cursor = connection.cursor()
             if column:
-                if print:
+                if printtoscreen:
                     print(f"Adding a Metadata_Plate column based on column {column}")
                 cursor.execute("ALTER TABLE Image ADD COLUMN Metadata_Plate TEXT;")
                 cursor.execute(f"UPDATE image SET Metadata_Plate ={column};")
@@ -155,7 +203,7 @@ def collate(
         if aws_remote:
             if printtoscreen:
                 print(f"Uploading {cache_backend_file} to {remote_backend_file}")
-            cp_cmd = ["aws", "s3", "cp", cache_backend_file, remote_backend_file]
+            cp_cmd = ["aws", "s3", "cp", str(cache_backend_file), remote_backend_file]
             run_check_errors(cp_cmd)
 
             if printtoscreen:
@@ -178,7 +226,7 @@ def collate(
 
         remote_aggregated_file = f"{aws_remote}/backend/{batch}/{plate}/{plate}.csv"
 
-        cp_cmd = ["aws", "s3", "cp", remote_backend_file, backend_file]
+        cp_cmd = ["aws", "s3", "cp", remote_backend_file, str(backend_file)]
         if printtoscreen:
             print(
                 f"Downloading SQLite files from {remote_backend_file} to {backend_file}"
@@ -199,12 +247,18 @@ def collate(
         add_image_features=add_image_features,
         image_feature_categories=image_feature_categories,
     )
-    database.aggregate_profiles(output_file=aggregated_file)
+    try:
+        database.aggregate_profiles(output_file=str(aggregated_file))
+    finally:
+        # Release the SQLite connection so the file can be removed or renamed on
+        # Windows (which holds an exclusive lock on open database files).
+        database.conn.close()
+        database.engine.dispose()
 
     if aws_remote:
         if printtoscreen:
             print(f"Uploading {aggregated_file} to {remote_aggregated_file}")
-        csv_cp_cmd = ["aws", "s3", "cp", aggregated_file, remote_aggregated_file]
+        csv_cp_cmd = ["aws", "s3", "cp", str(aggregated_file), remote_aggregated_file]
         run_check_errors(csv_cp_cmd)
 
         if printtoscreen:

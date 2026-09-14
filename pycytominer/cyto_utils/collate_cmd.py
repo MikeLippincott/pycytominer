@@ -1,4 +1,10 @@
+"""
+Build a CLI for collate function
+"""
+
 import argparse
+import tempfile
+
 from pycytominer.cyto_utils.collate import collate
 
 if __name__ == "__main__":
@@ -46,7 +52,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tmp-dir",
         dest="tmp_dir",
-        default="/tmp",  # noqa: S108
+        default=tempfile.gettempdir(),
         help="The temporary directory to be used by cytominer-databases for output",
     )
     parser.add_argument(

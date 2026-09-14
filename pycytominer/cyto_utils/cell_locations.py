@@ -2,20 +2,26 @@
 Utility function to augment a metadata file with X,Y locations of cells in each image
 """
 
+import collections
+import os
 import pathlib
-import pandas as pd
 import tempfile
+import warnings
 from typing import Optional, Union
 
 import boto3
 import botocore
-import collections
+import pandas as pd
 import sqlalchemy
 
 
 class CellLocation:
     """This class holds all the functions augment a metadata file with X,Y
     locations of cells in each image.
+
+    .. warning::
+        The ``CellLocation`` class is deprecated and will be removed in a
+        future Pycytominer release.
 
     In the metadata file, which is either a CSV or a Parquet file,
     - Each row is single multi-channel image
@@ -90,6 +96,15 @@ class CellLocation:
         cell_x_loc: str = "Nuclei_Location_Center_X",
         cell_y_loc: str = "Nuclei_Location_Center_Y",
     ):
+
+        # setting deprecation warning for the cell_locations module
+        warnings.warn(
+            "The CellLocation class is deprecated and will be removed in a "
+            "future Pycytominer release.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+
         self.metadata_input = self._expanduser(metadata_input)
         self.augmented_metadata_output = self._expanduser(augmented_metadata_output)
         self.single_cell_input = self._expanduser(single_cell_input)
@@ -106,7 +121,9 @@ class CellLocation:
             "s3", config=botocore.config.Config(signature_version=botocore.UNSIGNED)
         )
 
-    def _expanduser(self, obj: Union[str, None]):
+    def _expanduser(
+        self, obj: Union[str, pd.DataFrame, sqlalchemy.engine.Engine, None]
+    ):
         """Expand the user home directory in a path"""
         if obj is not None and isinstance(obj, str) and not obj.startswith("s3://"):
             return pathlib.Path(obj).expanduser().as_posix()
@@ -169,13 +186,28 @@ class CellLocation:
 
         bucket, key = self._parse_s3_path(uri)
 
-        tmp_file = tempfile.NamedTemporaryFile(
-            delete=False, suffix=pathlib.Path(key).name
-        )
+        # Use mkstemp so the file descriptor is closed before boto3 touches it.
+        # NamedTemporaryFile holds an exclusive OS lock while open on Windows;
+        # s3transfer does os.remove() + rename onto the same path internally,
+        # which raises PermissionError [WinError 32] if the fd is still open.
+        fd, tmp_path = tempfile.mkstemp(suffix=pathlib.Path(key).name)
+        os.close(fd)
 
-        self.s3.download_file(bucket, key, tmp_file.name)
+        try:
+            self.s3.download_file(bucket, key, tmp_path)
 
-        return tmp_file.name
+            tmp_file_path = pathlib.Path(tmp_path)
+            if tmp_file_path.exists() and tmp_file_path.stat().st_size > 0:
+                return tmp_path
+
+            raise ValueError(
+                f"Downloaded file '{tmp_path}' is empty or does not exist."
+            )
+        except Exception:
+            tmp_file_path = pathlib.Path(tmp_path)
+            if tmp_file_path.exists():
+                tmp_file_path.unlink()
+            raise
 
     def _load_metadata(self):
         """Load the metadata into a Pandas DataFrame
@@ -237,7 +269,9 @@ class CellLocation:
         """
 
         # define a dictionary to store the output
-        output_df_list = collections.defaultdict(list)
+        output_df_list: collections.defaultdict[str, list[object]] = (
+            collections.defaultdict(list)
+        )
 
         # iterate over each group of cells in the merged DataFrame
         group_cols = [*self.image_key, self.image_column, self.table_column]
@@ -348,38 +382,39 @@ class CellLocation:
         # get the sqlalchemy.engine.Engine object for the single_cell file
         temp_single_cell_input, engine = self._get_single_cell_engine()
 
-        # check that the single_cell file has the required tables and columns
-        self._check_single_cell_correctness(engine)
+        try:
+            # check that the single_cell file has the required tables and columns
+            self._check_single_cell_correctness(engine)
 
-        image_index_str = ", ".join(self.image_key)
+            # CAST each column at the database level.
+            # SQLite uses type affinity rather than strict column types, so
+            # values may not match their declared type; CAST enforces the
+            # expected types in the query itself rather than via a slower
+            # post-hoc pandas dtype conversion.
+            join_query = f"""
+            SELECT
+                CAST(Nuclei.{self.table_column} AS INTEGER) AS {self.table_column},
+                CAST(Nuclei.{self.image_column} AS INTEGER) AS {self.image_column},
+                CAST(Nuclei.{self.object_column} AS INTEGER) AS {self.object_column},
+                CAST(Nuclei.{self.cell_x_loc} AS REAL) AS {self.cell_x_loc},
+                CAST(Nuclei.{self.cell_y_loc} AS REAL) AS {self.cell_y_loc},
+                {", ".join(f"CAST(Image.{k} AS TEXT) AS {k}" for k in self.image_key)}
+            FROM Nuclei
+            INNER JOIN Image
+                ON Nuclei.{self.image_column} = Image.{self.image_column}
+                AND Nuclei.{self.table_column} = Image.{self.table_column};
+            """
 
-        # merge the Image and Nuclei tables in SQL
-
-        join_query = f"""
-        SELECT Nuclei.{self.table_column},Nuclei.{self.image_column},Nuclei.{self.object_column},Nuclei.{self.cell_x_loc},Nuclei.{self.cell_y_loc},Image.{image_index_str}
-        FROM Nuclei
-        INNER JOIN Image
-        ON Nuclei.{self.image_column} = Image.{self.image_column} and Nuclei.{self.table_column} = Image.{self.table_column};
-        """
-
-        column_types = {
-            self.image_column: "int64",
-            self.table_column: "int64",
-            self.object_column: "int64",
-            self.cell_x_loc: "float",
-            self.cell_y_loc: "float",
-        }
-
-        for image_key in self.image_key:
-            column_types[image_key] = "str"
-
-        joined_df = pd.read_sql_query(join_query, engine, dtype=column_types)
-
-        # if the single_cell file was downloaded from S3, delete the temporary file
-        if temp_single_cell_input is not None:
-            pathlib.Path(temp_single_cell_input).unlink()
-
-        return joined_df
+            return pd.read_sql_query(join_query, engine)
+        finally:
+            # Always dispose the engine and remove the temp file.
+            # On Windows, SQLAlchemy's connection pool keeps the SQLite file open;
+            # unlink() raises PermissionError [WinError 32] unless disposed first.
+            engine.dispose()
+            if temp_single_cell_input is not None:
+                temp_path = pathlib.Path(temp_single_cell_input)
+                if temp_path.exists():
+                    temp_path.unlink()
 
     def _load_single_cell(self):
         """Load the required columns from the `Image` and `Nuclei` tables in the single_cell file or sqlalchemy.engine.Engine object into a Pandas DataFrame

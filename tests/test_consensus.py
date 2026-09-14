@@ -13,7 +13,7 @@ random.seed(123)
 tmpdir = tempfile.gettempdir()
 output_test_file_csv = os.path.join(tmpdir, "test.csv")
 output_test_file_parquet = os.path.join(tmpdir, "test.parquet")
-input_test_file = os.path.join(tmpdir, "example_input.csv")
+input_test_file = os.path.join(tmpdir, "example_input.parquet")
 
 # Set example data
 data_df = pd.DataFrame({
@@ -34,7 +34,7 @@ data_df = pd.DataFrame({
     "Nuclei_zz": [14, 46, 1, 6, 30, 100, 2, 2],
 }).reset_index(drop=True)
 
-data_df.to_csv(input_test_file, index=False)
+data_df.to_parquet(input_test_file, index=False)
 
 
 def test_consensus_aggregate():
@@ -119,8 +119,8 @@ def test_output_type():
     parquet_df = pd.read_parquet(output_test_file_parquet)
 
     # check to make sure the files were read in corrrectly as a pd.Dataframe
-    assert type(csv_df) == pd.DataFrame
-    assert type(parquet_df) == pd.DataFrame
+    assert isinstance(csv_df, pd.DataFrame)
+    assert isinstance(parquet_df, pd.DataFrame)
 
     # check to make sure both dataframes are the same regardless of the output_type
     pd.testing.assert_frame_equal(csv_df, parquet_df)

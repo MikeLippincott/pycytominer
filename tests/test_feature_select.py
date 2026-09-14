@@ -1,14 +1,25 @@
 import os
+import pathlib
 import random
 import tempfile
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from pycytominer.cyto_utils import Blocklist
+from pycytominer.cyto_utils.blocklist import blocklists_file
 from pycytominer.feature_select import feature_select
 
+# Path to the old-style CSV blocklist file kept for backward compatibility.
+_legacy_blocklist_file = (
+    pathlib.Path(blocklists_file).parent.parent / "data" / "blocklist_features.txt"
+)
+
 random.seed(123)
+
+packaged_blocklist_name = "default"
 
 # Get temporary directory
 tmpdir = tempfile.gettempdir()
@@ -288,13 +299,52 @@ def test_feature_select_get_na_columns_feature_infer():
 
 
 def test_feature_select_variance_threshold():
-    """
-    Testing feature_select and variance_threshold pycytominer function
-    """
+    """Test that feature_select removes low-variance features."""
+    data_var_test_df = pd.DataFrame({
+        "Cells_AreaShape_Eccentricity": [
+            0.73120,
+            0.73121,
+            0.73119,
+            0.73120,
+            0.73122,
+            0.73119,
+        ],  # low_variance feature
+        "Cells_AreaShape_Area": [
+            113.4,
+            128.7,
+            141.2,
+            176.8,
+            190.5,
+            224.9,
+        ],  # high_variance feature
+    }).reset_index(drop=True)
+
+    result = feature_select(
+        data_var_test_df,
+        features=data_var_test_df.columns.tolist(),
+        operation="variance_threshold",
+        min_variance=0.000001,
+    )
+    expected_result = pd.DataFrame({
+        "Cells_AreaShape_Area": [113.4, 128.7, 141.2, 176.8, 190.5, 224.9]
+    }).reset_index(drop=True)
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    result = feature_select(
+        data_var_test_df,
+        features=data_var_test_df.columns.tolist(),
+        operation="variance_threshold",
+        min_variance=0.0,
+    )
+    pd.testing.assert_frame_equal(result, data_var_test_df)
+
+
+def test_feature_select_frequency_threshold():
+    """Test that feature_select removes low-frequency and low-unique features."""
     result = feature_select(
         data_unique_test_df,
         features=data_unique_test_df.columns.tolist(),
-        operation="variance_threshold",
+        operation="frequency_threshold",
         unique_cut=0.01,
     )
     expected_result = pd.DataFrame({
@@ -309,7 +359,7 @@ def test_feature_select_variance_threshold():
     result = feature_select(
         na_data_unique_test_df,
         features=na_data_unique_test_df.columns.tolist(),
-        operation=["drop_na_columns", "variance_threshold"],
+        operation=["drop_na_columns", "frequency_threshold"],
     )
     expected_result = pd.DataFrame({"c": c_feature, "d": d_feature}).reset_index(
         drop=True
@@ -322,7 +372,7 @@ def test_feature_select_variance_threshold():
     result = feature_select(
         na_data_unique_test_df,
         features=na_data_unique_test_df.columns.tolist(),
-        operation=["variance_threshold", "drop_na_columns"],
+        operation=["frequency_threshold", "drop_na_columns"],
     )
     expected_result = pd.DataFrame({"c": c_feature, "d": d_feature}).reset_index(
         drop=True
@@ -354,7 +404,10 @@ def test_feature_select_correlation_threshold():
 
 
 def test_feature_select_all():
-    data_all_test_df = data_unique_test_df.assign(zz=a_feature)
+    low_variance_feature = [1] * 95 + [1.0001] * 5
+    data_all_test_df = data_unique_test_df.assign(
+        zz=a_feature, low_variance=low_variance_feature
+    )
     data_all_test_df.iloc[1, 4] = 2
     data_all_test_df.iloc[list(range(0, 50)), 1] = np.nan
 
@@ -368,6 +421,7 @@ def test_feature_select_all():
         "c": c_feature,
         "d": d_feature,
         "zz": a_feature,
+        "low_variance": low_variance_feature,
     }).reset_index(drop=True)
     expected_result.iloc[1, 2] = 2
     pd.testing.assert_frame_equal(result, expected_result)
@@ -376,8 +430,8 @@ def test_feature_select_all():
     tmpdir = tempfile.gettempdir()
 
     # Write file to output
-    data_file = os.path.join(tmpdir, "test_feature_select.csv")
-    data_all_test_df.to_csv(data_file, index=False, sep=",")
+    data_file = os.path.join(tmpdir, "test_feature_select.parquet")
+    data_all_test_df.to_parquet(data_file, index=False)
     out_file = os.path.join(tmpdir, "test_feature_select_out.csv")
     _ = feature_select(
         profiles=data_file,
@@ -392,7 +446,12 @@ def test_feature_select_all():
     result = feature_select(
         profiles=data_all_test_df,
         features=data_all_test_df.columns.tolist(),
-        operation=["drop_na_columns", "correlation_threshold", "variance_threshold"],
+        operation=[
+            "drop_na_columns",
+            "correlation_threshold",
+            "frequency_threshold",
+            "variance_threshold",
+        ],
         corr_threshold=0.7,
     )
     expected_result = pd.DataFrame({"c": c_feature, "d": d_feature}).reset_index(
@@ -428,15 +487,133 @@ def test_feature_select_blocklist():
         "zz": [0, -3, 8, 9, 6, 9],
     }).reset_index(drop=True)
 
+    # No blocklist is supplied, so the default packaged blocklist is used.
     result = feature_select(data_blocklist_df, features="infer", operation="blocklist")
     expected_result = pd.DataFrame({"y": [1, 2, 8, 5, 2, 1], "zz": [0, -3, 8, 9, 6, 9]})
     pd.testing.assert_frame_equal(result, expected_result)
 
+    # Explicit features without a blocklist also applies the default packaged blocklist.
     result = feature_select(
         data_blocklist_df,
         features=data_blocklist_df.columns.tolist(),
         operation="blocklist",
     )
+    expected_result = pd.DataFrame({"y": [1, 2, 8, 5, 2, 1], "zz": [0, -3, 8, 9, 6, 9]})
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # A packaged blocklist name removes the matching feature columns from the table.
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist_name=packaged_blocklist_name,
+    )
+    expected_result = pd.DataFrame({"y": [1, 2, 8, 5, 2, 1], "zz": [0, -3, 8, 9, 6, 9]})
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # Packaged blocklist names can also be supplied as a list.
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist_name=[packaged_blocklist_name],
+    )
+    expected_result = pd.DataFrame({"y": [1, 2, 8, 5, 2, 1], "zz": [0, -3, 8, 9, 6, 9]})
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # A list of explicit feature names removes each matching column.
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist=["Nuclei_Correlation_Manders_AGP_DNA", "zz"],
+    )
+    expected_result = pd.DataFrame({
+        "y": [1, 2, 8, 5, 2, 1],
+        "Nuclei_Correlation_RWC_ER_RNA": [9, 3, 8, 9, 2, 9],
+    })
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # A Blocklist object can carry explicit feature names into feature_select().
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist=Blocklist(features_to_block=["Nuclei_Correlation_RWC_ER_RNA"]),
+    )
+    expected_result = pd.DataFrame({
+        "Nuclei_Correlation_Manders_AGP_DNA": [1, 3, 8, 5, 2, 2],
+        "y": [1, 2, 8, 5, 2, 1],
+        "zz": [0, -3, 8, 9, 6, 9],
+    })
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # A Blocklist object can combine a packaged blocklist with extra explicit features.
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist=Blocklist(
+            blocklist_name=packaged_blocklist_name, features_to_block=["zz"]
+        ),
+    )
+    expected_result = pd.DataFrame({"y": [1, 2, 8, 5, 2, 1]})
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # A one-item list removes the one matching feature and keeps the rest.
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist=["Nuclei_Correlation_Manders_AGP_DNA"],
+    )
+    expected_result = pd.DataFrame({
+        "y": [1, 2, 8, 5, 2, 1],
+        "Nuclei_Correlation_RWC_ER_RNA": [9, 3, 8, 9, 2, 9],
+        "zz": [0, -3, 8, 9, 6, 9],
+    })
+    pd.testing.assert_frame_equal(result, expected_result)
+
+    # A single feature string behaves like a one-item blocklist.
+    result = feature_select(
+        data_blocklist_df,
+        features=data_blocklist_df.columns.tolist(),
+        operation="blocklist",
+        blocklist="Nuclei_Correlation_Manders_AGP_DNA",
+    )
+    expected_result = pd.DataFrame({
+        "y": [1, 2, 8, 5, 2, 1],
+        "Nuclei_Correlation_RWC_ER_RNA": [9, 3, 8, 9, 2, 9],
+        "zz": [0, -3, 8, 9, 6, 9],
+    })
+    pd.testing.assert_frame_equal(result, expected_result)
+
+
+def test_feature_select_blocklist_file_deprecated():
+    """feature_select warns and applies the legacy blocklist_file correctly."""
+    data_blocklist_df = pd.DataFrame({
+        "Nuclei_Correlation_Manders_AGP_DNA": [1, 3, 8, 5, 2, 2],
+        "y": [1, 2, 8, 5, 2, 1],
+        "Nuclei_Correlation_RWC_ER_RNA": [9, 3, 8, 9, 2, 9],
+        "zz": [0, -3, 8, 9, 6, 9],
+    }).reset_index(drop=True)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = feature_select(
+            data_blocklist_df,
+            features=data_blocklist_df.columns.tolist(),
+            operation="blocklist",
+            blocklist_file=str(_legacy_blocklist_file),
+        )
+
+    deprecation_warnings = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    assert len(deprecation_warnings) == 1
+    assert "blocklist_file" in str(deprecation_warnings[0].message)
+
+    # Blocklisted CellProfiler features should be dropped; plain columns remain.
     expected_result = pd.DataFrame({"y": [1, 2, 8, 5, 2, 1], "zz": [0, -3, 8, 9, 6, 9]})
     pd.testing.assert_frame_equal(result, expected_result)
 
@@ -489,8 +666,71 @@ def test_output_type():
     parquet_df = pd.read_parquet(output_test_file_parquet)
 
     # check to make sure the files were read in corrrectly as a pd.Dataframe
-    assert type(csv_df) == pd.DataFrame
-    assert type(parquet_df) == pd.DataFrame
+    assert isinstance(csv_df, pd.DataFrame)
+    assert isinstance(parquet_df, pd.DataFrame)
 
     # check to make sure both dataframes are the same regardless of the output_type
     pd.testing.assert_frame_equal(csv_df, parquet_df)
+
+
+def test_samples_parameter_in_feature_select():
+    # Create a list of 100 elements with 10 replicates of 10 perturbations
+    data_unique_test_df_groups = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    data_unique_test_df_groups = [
+        elem for elem in data_unique_test_df_groups for _ in range(10)
+    ]
+
+    # Make a copy of the test DataFrame
+    data_unique_test_df3 = data_unique_test_df.copy()
+    data_unique_test_df3_features = data_unique_test_df3.columns.tolist()
+
+    # Add a metadata column for creating a sample query
+    data_unique_test_df3["Metadata_sample"] = ["A", "B"] * 50
+
+    # Define the sample query
+    sample_query = "Metadata_sample == 'A'"
+
+    # Add a perturb group metadata column for noise removal operation
+    data_unique_test_df3["perturb_group"] = data_unique_test_df_groups
+
+    # establishing all operations that use "samples" parameter
+    # note that blocklist does not use samples parameter
+    all_operations = [
+        "noise_removal",
+        "drop_na_columns",
+        "variance_threshold",
+        "frequency_threshold",
+        "correlation_threshold",
+        "drop_outliers",
+    ]
+    for operation_idx, operation in enumerate(all_operations):
+        # testing single operation
+        results6a = feature_select(
+            profiles=data_unique_test_df3,
+            features=data_unique_test_df3_features,
+            operation=operation,
+            samples=sample_query,
+            noise_removal_perturb_groups="perturb_group",
+            noise_removal_stdev_cutoff=500,
+        )
+
+        # checking if no rows were not removed
+        assert results6a.shape[0] == data_unique_test_df3.shape[0], (
+            f"Row counts do not match: {results6a[0]} != {data_unique_test_df3.shape[0]} in operation: {operation}"
+        )
+
+        # testing multiple operations (continually appends operations)
+        concat_operations = all_operations[: operation_idx + 1]
+        results6b = feature_select(
+            profiles=data_unique_test_df3,
+            features=data_unique_test_df3_features,
+            operation=concat_operations,
+            samples=sample_query,
+            noise_removal_perturb_groups="perturb_group",
+            noise_removal_stdev_cutoff=500,
+        )
+
+        # checking if no rows were not removed
+        assert results6b.shape[0] == data_unique_test_df3.shape[0], (
+            f"Row counts do not match: {results6a[0]} != {data_unique_test_df3.shape[0]} in operation: {concat_operations}"
+        )

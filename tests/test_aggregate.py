@@ -45,7 +45,7 @@ data_missing_df = pd.concat([
 ]).reset_index(drop=True)
 
 features = infer_cp_features(data_df)
-dtype_convert_dict = {x: float for x in features}
+dtype_convert_dict = dict.fromkeys(features, float)
 
 
 def test_aggregate_median_allvar():
@@ -61,6 +61,19 @@ def test_aggregate_median_allvar():
         pd.DataFrame({"g": "b", "Cells_x": [3], "Nuclei_y": [3]}),
     ]).reset_index(drop=True)
     expected_result = expected_result.astype(dtype_convert_dict)
+
+    assert aggregate_result.equals(expected_result)
+
+    # Test that ImageNumber column would be dropped before return
+    data_df_with_imagenumber = data_df.copy()
+    data_df_with_imagenumber["ImageNumber"] = "1"
+
+    aggregate_result = aggregate(
+        population_df=data_df_with_imagenumber,
+        strata=["g"],
+        features="infer",
+        operation="median",
+    )
 
     assert aggregate_result.equals(expected_result)
 
@@ -120,6 +133,31 @@ def test_aggregate_mean_subsetvar():
     expected_result.Cells_x = expected_result.Cells_x.astype(float)
 
     assert aggregate_result.equals(expected_result)
+
+
+def test_aggregate_infer_with_image_features():
+    image_data_df = pd.DataFrame({
+        "g": ["a", "a", "b", "b"],
+        "Cells_x": [1, 3, 5, 7],
+        "Image_Quality": [10.0, 14.0, 20.0, 24.0],
+        "Image_OMEArrow_Payload": [{"a": 1}, {"a": 2}, {"a": 3}, {"a": 4}],
+    })
+
+    aggregate_result = aggregate(
+        population_df=image_data_df,
+        strata=["g"],
+        features="infer",
+        image_features=True,
+        operation="median",
+    )
+
+    expected_result = pd.DataFrame({
+        "g": ["a", "b"],
+        "Cells_x": [2.0, 6.0],
+        "Image_Quality": [12.0, 22.0],
+    })
+
+    pd.testing.assert_frame_equal(aggregate_result, expected_result)
 
 
 def test_aggregate_median_dtype_confirm():
@@ -311,8 +349,8 @@ def test_output_type():
     parquet_df = pd.read_parquet(test_output_file_parquet)
 
     # check to make sure the files were read in corrrectly as a pd.Dataframe
-    assert type(csv_df) == pd.DataFrame
-    assert type(parquet_df) == pd.DataFrame
+    assert isinstance(csv_df, pd.DataFrame)
+    assert isinstance(parquet_df, pd.DataFrame)
 
     # check to make sure both dataframes are the same regardless of the output_type
     pd.testing.assert_frame_equal(csv_df, parquet_df)

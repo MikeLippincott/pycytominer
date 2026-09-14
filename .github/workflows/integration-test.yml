@@ -20,12 +20,11 @@ env:
   LANG: "en_US.utf-8"
   LC_ALL: "en_US.utf-8"
   PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
-  POETRY_CACHE_DIR: ${{ github.workspace }}/.cache/pypoetry
-  POETRY_VIRTUALENVS_IN_PROJECT: "true"
   PRE_COMMIT_HOME: ${{ github.workspace }}/.cache/pre-commit
   PYTEST_ADDOPTS: ${{ github.event.inputs.pytest_addopts }}
   PYTHONIOENCODING: "UTF-8"
-  TARGET_PYTHON_VERSION: "3.9"
+  TARGET_PYTHON_VERSION: "3.10"
+  UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv # overridden per-job by setup-env action via $GITHUB_ENV
 
 jobs:
   quality-test:
@@ -36,11 +35,11 @@ jobs:
     # This job doesn't fail fast to ensure that feedback on function is still provided
     strategy:
       fail-fast: false
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: github.event_name != 'schedule'
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Full history required for branch-based pre-commit checks
           fetch-depth: 0
@@ -50,75 +49,139 @@ jobs:
           python-version: ${{ env.TARGET_PYTHON_VERSION }}
           cache-pre-commit: true
           cache-venv: false
-          setup-poetry: false
+          setup-uv: true
           install-deps: false
-      - name: Run pre-commit checks on all files
-        uses: pre-commit/action@v3.0.0
+      - name: Run pre-commit checks on all files (with prek)
+        uses: j178/prek-action@v3.0.0
+        id: pre_commit
+      # run pre-commit ci lite for automated fixes
+      - uses: pre-commit-ci/lite-action@v1.1.0
+        if: ${{ !cancelled() && steps.pre_commit.outcome == 'failure' }}
+  python-type-checks:
+    # This job is used to check Python types
+    name: Python type checks
+    # Avoid fail-fast to retain output
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'schedule'
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+      - name: Setup python, and check pre-commit cache
+        uses: ./.github/actions/setup-env
         with:
-          extra_args: --all-files
+          python-version: ${{ env.TARGET_PYTHON_VERSION }}
+          cache-pre-commit: false
+          cache-venv: true
+          setup-uv: true
+          install-deps: true
+      - name: Run mypy
+        run: |
+          uv run mypy .
+  docs-build-test:
+    # This job checks that the docs build
+    name: Docs build test
+    # Avoid fail-fast to observe gh actions output
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'schedule'
+    steps:
+      - name: Install pandoc
+        uses: pandoc/actions/setup@v1
+      - name: Checkout repo
+        uses: actions/checkout@v7
+      - name: Setup python, and check pre-commit cache
+        uses: ./.github/actions/setup-env
+        with:
+          python-version: ${{ env.TARGET_PYTHON_VERSION }}
+          cache-pre-commit: false
+          cache-venv: true
+          setup-uv: true
+          install-deps: true
+      - name: Run sphinx-build
+        run: |
+          uv run sphinx-build docs/ docs-build/
   integration-test:
     name: Pytest (Python ${{ matrix.python-version }} on ${{ matrix.os }})
     # Runs pytest on all tested versions of python and OSes
+    needs:
+      - quality-test
+      - build
     strategy:
       fail-fast: false
       matrix:
         os:
-          - macos-13
-          - ubuntu-22.04
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
+          - macos-14
+          - ubuntu-24.04
+          - windows-2022
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        exclude:
+          # NumPy's MINGW-W64 Windows build for Python 3.14 is self-described as
+          # "experimental" with crashes expected. Exclude until NumPy ships a
+          # stable Windows wheel for 3.14.
+          # https://github.com/numpy/numpy/issues/26038
+          - os: windows-2022
+            python-version: "3.14"
     runs-on: ${{ matrix.os }}
     env:
       OS: ${{ matrix.os }}
-      # This is needed to avoid a warning from SQLAlchemy
-      # https://sqlalche.me/e/b8d9
-      # We can remove this once we upgrade to SQLAlchemy >= 2.0
-      SQLALCHEMY_SILENCE_UBER_WARNING: "1"
     if: github.event_name != 'schedule'
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup python, and load cache
         uses: ./.github/actions/setup-env
         with:
           python-version: ${{ matrix.python-version }}
           cache-pre-commit: false
           cache-venv: true
-          setup-poetry: true
-          install-deps: true
+          setup-uv: true
+          install-deps: false
+      - name: Install dev dependencies (without docs group)
+        # Docs-only deps (cosmicqc -> llvmlite) cannot build on Python 3.14,
+        # so pytest jobs install only the dev group.
+        env:
+          UV_PYTHON: ${{ matrix.python-version }}
+        run: uv sync --frozen --all-extras --group dev
       - name: Run pytest and generate coverage report
         # For the target version and ubuntu, run pytest and generate coverage report
-        if: (matrix.os == 'ubuntu-22.04')  && (matrix.python-version == env.TARGET_PYTHON_VERSION)
-        run: poetry run pytest --cov=./ --cov-report=xml ${{ github.event.inputs.pytest_addopts }}
+        # Minimal wheel build tests run separately to confirm successful install.
+        if: (matrix.os == 'ubuntu-24.04')  && (matrix.python-version == env.TARGET_PYTHON_VERSION)
+        run: uv run pytest --ignore=tests/minimal_wheel_build_tests --cov=./ --cov-report=xml ${{ github.event.inputs.pytest_addopts }}
       - name: Upload coverage to Codecov
         # For the target version and ubuntu, upload coverage to Codecov
-        continue-on-error: true
-        if: (matrix.os == 'ubuntu-22.04') && (matrix.python-version == env.TARGET_PYTHON_VERSION )
-        uses: codecov/codecov-action@v3
+        if: (matrix.os == 'ubuntu-24.04') && (matrix.python-version == env.TARGET_PYTHON_VERSION )
+        uses: codecov/codecov-action@v7
         env:
           OS: ${{ matrix.os }}
           PYTHON: ${{ matrix.python-version }}
         with:
-          file: ./coverage.xml
-          files: ./coverage1.xml,./coverage2.xml
-          directory: ./coverage/reports/
+          files: ./coverage.xml
+          disable_search: true
           env_vars: OS,PYTHON
           fail_ci_if_error: true
           flags: unittests
           name: pycytominer
+          # Adds codecov token. See the link below for more information:
+          # https://docs.codecov.com/docs/adding-the-codecov-token
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Run pytest
         # For every other version and/or OS, run pytest without coverage
-        if: (matrix.os != 'ubuntu-22.04') || (matrix.python-version != env.TARGET_PYTHON_VERSION )
-        run: poetry run pytest ${{ github.event.inputs.pytest_addopts }}
+        # Minimal wheel build tests run separately to confirm successful install.
+        if: (matrix.os != 'ubuntu-24.04') || (matrix.python-version != env.TARGET_PYTHON_VERSION )
+        run: uv run pytest --ignore=tests/minimal_wheel_build_tests ${{ github.event.inputs.pytest_addopts }}
   build:
     name: Build versioned package
     # This job is used to build the package and upload the artifacts to GitHub Actions workflow results.
     # See https://github.com/actions/upload-artifact?tab=readme-ov-file#where-does-the-upload-go
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Setup python, and load cache
@@ -127,69 +190,109 @@ jobs:
           python-version: ${{ env.TARGET_PYTHON_VERSION }}
           cache-pre-commit: false
           cache-venv: true
-          setup-poetry: true
+          setup-uv: true
           install-deps: true
       - name: Build
-        run: poetry build
-      - name: Get pycytominer version
+        run: uv build
+      - name: Get Pycytominer version
         id: get_version
         run: |
-          echo "version=$(poetry version | cut -d' ' -f2 )" >> "$GITHUB_OUTPUT"
+          sdist_filename=$(basename dist/*.tar.gz)
+          echo "version=${sdist_filename#pycytominer-}" | sed 's/\.tar\.gz$//' >> "$GITHUB_OUTPUT"
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheel
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 90
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 90
+  minimal-wheel-build-tests:
+    name: Minimal wheel build tests
+    # Validate the built wheel in an isolated environment so packaging and
+    # runtime dependency issues are caught outside the normal source checkout.
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.event_name != 'schedule'
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+      - name: Setup python, and load cache
+        uses: ./.github/actions/setup-env
+        with:
+          python-version: ${{ env.TARGET_PYTHON_VERSION }}
+          cache-pre-commit: false
+          cache-venv: false
+          setup-uv: true
+          install-deps: false
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel
+          path: dist
+      - name: Run minimal wheel build tests
+        env:
+          UV_PYTHON: ${{ env.TARGET_PYTHON_VERSION }}
+        run: |
+          # Use runner temp paths so these tests do not import from the source checkout.
+          test_root="$RUNNER_TEMP/minimal-wheel-build-tests"
+          venv="$RUNNER_TEMP/minimal-wheel-build-venv"
+
+          # Copy only the minimal wheel build tests and their fixture data.
+          mkdir -p "$test_root/tests/test_data"
+          cp -R tests/minimal_wheel_build_tests "$test_root/tests/"
+          cp -R tests/test_data/minimal_wheel_build_tests "$test_root/tests/test_data/"
+
+          # Create a clean virtual environment and install the built wheel artifact.
+          uv venv "$venv"
+          uv pip install --python "$venv/bin/python" pytest dist/*.whl
+
+          # Run pytest from the isolated test root against the installed wheel.
+          cd "$test_root"
+          "$venv/bin/python" -m pytest tests/minimal_wheel_build_tests ${{ github.event.inputs.pytest_addopts }}
   docker-image-test-and-push:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     # set a dependency sequence to occur after build job completion
     needs: build
     env:
       version: ${{ needs.build.outputs.version }}
-      sdist_filename: pycytominer-${{ needs.build.outputs.version}}.tar.gz
-      sdist_extracted_name: pycytominer-${{ needs.build.outputs.version}}
     steps:
       # checks out selected files for docker image build testing
       - name: Checkout selected files
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: |
             build/docker/Dockerfile
+            README.md
+            pyproject.toml
+            pycytominer
+            uv.lock
             tests
           sparse-checkout-cone-mode: false
-      - name: Download sdist artifact
-        uses: actions/download-artifact@v4
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v8
         with:
-          name: sdist
-      # gather the sdist tar.gz name (which varies)
-      # unzips the sdist
-      - name: Extract sdist
-        run: |
-          tar -xzvf "${{ env.sdist_filename}}"
+          name: wheel
+          path: dist
       # note: roughly follows Docker documentation on GitHub Actions usage
       # found on the following https://github.com/docker/build-push-action
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4.2.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       # attempts to build a test image for observing test behavior
       # and modeling a production image build. Version label
       # assumes pwd of, for example: pycytominer-1.0.1.post37.dev0+55690e4,
       # where we attempt to use 1.0.1.post37.dev0+55690e4 as a version label.
       - name: Build docker image for testing
         run: |
-          cd "${{ env.sdist_extracted_name }}" && \
-          cp -r ../tests . && \
-          docker build -f ../build/docker/Dockerfile \
+          docker build -f build/docker/Dockerfile \
             -t pycytominer:testing \
             --label version="${{ env.version }}" \
             --target testing \
@@ -204,12 +307,12 @@ jobs:
         if: (github.event_name == 'push'||  github.event_name == 'schedule') && github.ref == 'refs/heads/main'
         id: env-vars
         run: >-
-          echo "CLEAN_VERSION=$(echo ${{ env.sdist_extracted_name }} | tr '+' '_' )" >> "$GITHUB_OUTPUT" &&
+          echo "CLEAN_VERSION=$(echo ${{ env.version }} | tr '+' '_' )" >> "$GITHUB_OUTPUT" &&
           echo "DATE_TAG=$(date +'%y%m%d')" >> "$GITHUB_OUTPUT"
       - name: Login to Docker Hub
         # only run this task if we have a pull request merged or the schedule triggers from main
         if: (github.event_name == 'push'||  github.event_name == 'schedule') && github.ref == 'refs/heads/main'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
@@ -217,9 +320,9 @@ jobs:
       - name: Schedule-based docker image push
         # only run this task if we have a schedule trigger from main on cytomining/pycytominer
         if: github.event_name == 'schedule' &&  github.ref == 'refs/heads/main' && github.repository == 'cytomining/pycytominer'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7.3.0
         with:
-          context: "${{ env.sdist_extracted_name }}"
+          context: "."
           push: true
           file: ./build/docker/Dockerfile
           target: production
@@ -228,9 +331,9 @@ jobs:
       - name: Push-based docker image push
         # only run this task if we have a pull request which is merged
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'cytomining/pycytominer'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7.3.0
         with:
-          context: "${{ env.sdist_extracted_name }}"
+          context: "."
           push: true
           file: ./build/docker/Dockerfile
           target: production
@@ -239,9 +342,9 @@ jobs:
       - name: Update Docker Hub repository description from readme
         # only run this task if we have a pull request which is merged
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'cytomining/pycytominer'
-        uses: peter-evans/dockerhub-description@v3
+        uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
           repository: cytomining/pycytominer
-          readme-filepath: "${{ env.sdist_extracted_name }}/README.md"
+          readme-filepath: "./README.md"
